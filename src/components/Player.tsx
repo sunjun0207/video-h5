@@ -6,6 +6,7 @@ import type { Episode } from '../lib/types'
 type Props = {
   episode: Episode
   resumeAt: number
+  loadError?: string
   onTime: (time: number) => void
   onEnded: () => void
 }
@@ -18,29 +19,84 @@ function formatTime(value: number): string {
   return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
 }
 
-export function Player({ episode, resumeAt, onTime, onEnded }: Props) {
+export function Player({ episode, resumeAt, loadError = '', onTime, onEnded }: Props) {
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const stageRef = useRef<HTMLDivElement | null>(null)
   const resumed = useRef(false)
+  const endedRef = useRef(false)
+  const endAtRef = useRef(0)
+  const nativePlayback = useRef(false)
+  const onEndedRef = useRef(onEnded)
+  const waitTimer = useRef(0)
   const [playing, setPlaying] = useState(false)
   const [current, setCurrent] = useState(0)
   const [duration, setDuration] = useState(0)
   const [error, setError] = useState('')
+  const [booting, setBooting] = useState(true)
+  const [waiting, setWaiting] = useState(false)
+  const [needTap, setNeedTap] = useState(false)
+  onEndedRef.current = onEnded
+
+  const finish = () => {
+    if (endedRef.current) return
+    endedRef.current = true
+    videoRef.current?.pause()
+    onEndedRef.current()
+  }
 
   useEffect(() => {
     resumed.current = false
+    endedRef.current = false
+    endAtRef.current = 0
+    nativePlayback.current = false
     setError('')
     setPlaying(false)
     setCurrent(0)
+    setDuration(0)
+    setNeedTap(false)
+    setWaiting(false)
+    setBooting(true)
     const video = videoRef.current
     if (!video || !episode.url) return
+    let live = true
     let hls: Hls | undefined
+    let started = false
+    let starting = false
+    const attachedAt = Date.now()
+    const bufferedAhead = () => {
+      if (!video.buffered.length) return 0
+      return video.buffered.end(video.buffered.length - 1) - video.currentTime
+    }
+    const start = () => {
+      if (!live || started || starting || endedRef.current) return
+      const ahead = bufferedAhead()
+      const waited = Date.now() - attachedAt
+      if (ahead < 6 && waited < 10000) return
+      if (video.readyState < 3 && ahead < 2 && waited < 15000) return
+      starting = true
+      void video.play().then(() => {
+        if (!live) return
+        started = true
+        starting = false
+        setNeedTap(false)
+      }).catch((reason: unknown) => {
+        if (!live) return
+        starting = false
+        const blocked = reason instanceof DOMException && reason.name === 'NotAllowedError'
+        if (!blocked) return
+        started = true
+        if (!endedRef.current) setNeedTap(true)
+      })
+    }
+    const armEnd = (seconds: number) => {
+      if (Number.isFinite(seconds) && seconds > 8) endAtRef.current = seconds
+    }
     if (episode.url.includes('.m3u8') && Hls.isSupported()) {
       const slow = {
-        maxTimeToFirstByteMs: 30000,
-        maxLoadTimeMs: 120000,
-        timeoutRetry: { maxNumRetry: 3, retryDelayMs: 500, maxRetryDelayMs: 4000 },
-        errorRetry: { maxNumRetry: 4, retryDelayMs: 1000, maxRetryDelayMs: 8000 },
+        maxTimeToFirstByteMs: 20000,
+        maxLoadTimeMs: 60000,
+        timeoutRetry: { maxNumRetry: 4, retryDelayMs: 400, maxRetryDelayMs: 4000 },
+        errorRetry: { maxNumRetry: 6, retryDelayMs: 800, maxRetryDelayMs: 8000 },
       }
       const BaseLoader = Hls.DefaultConfig.loader
       class ProxyLoader extends BaseLoader {
@@ -58,43 +114,91 @@ export function Player({ episode, resumeAt, onTime, onEnded }: Props) {
           super.load(context, config, callbacks)
         }
       }
+      const startAt = resumeAt > 1 ? resumeAt : -1
       hls = new Hls({
+        enableWorker: true,
         lowLatencyMode: false,
-        maxBufferLength: 48,
-        maxMaxBufferLength: 120,
-        backBufferLength: 30,
+        capLevelToPlayerSize: true,
+        startLevel: 0,
+        startPosition: startAt,
+        testBandwidth: true,
+        abrEwmaDefaultEstimate: 900_000,
+        abrBandWidthFactor: 0.8,
+        abrBandWidthUpFactor: 0.5,
+        maxBufferLength: 24,
+        maxMaxBufferLength: 48,
+        maxBufferSize: 28 * 1000 * 1000,
+        backBufferLength: 12,
         startFragPrefetch: true,
+        maxBufferHole: 0.5,
+        nudgeMaxRetry: 8,
         manifestLoadPolicy: { default: slow },
         playlistLoadPolicy: { default: slow },
         fragLoadPolicy: { default: slow },
         loader: ProxyLoader,
       })
+      hls.autoLevelCapping = 0
       hls.loadSource(episode.url)
       hls.attachMedia(video)
+      hls.on(Hls.Events.FRAG_BUFFERED, () => start())
+      hls.on(Hls.Events.LEVEL_LOADED, (_, data) => {
+        if (!data.details.live) armEnd(data.details.totalduration)
+      })
+      hls.on(Hls.Events.MEDIA_ENDED, () => finish())
+      let recovers = 0
       hls.on(Hls.Events.ERROR, (_, data) => {
-        if (data.fatal) setError('这一段暂时安静了，换一条路，或稍后再来。')
+        if (data.details === Hls.ErrorDetails.BUFFER_STALLED_ERROR) {
+          const level = hls?.currentLevel ?? -1
+          if (hls && level > 0) hls.autoLevelCapping = level - 1
+          return
+        }
+        if (!data.fatal || !hls) return
+        if (data.type === Hls.ErrorTypes.NETWORK_ERROR && recovers < 3) {
+          recovers += 1
+          hls.startLoad()
+          return
+        }
+        if (data.type === Hls.ErrorTypes.MEDIA_ERROR && recovers < 2) {
+          recovers += 1
+          hls.recoverMediaError()
+          return
+        }
+        setError('这一段暂时安静了，换一条路，或稍后再来。')
+        setBooting(false)
       })
     } else {
+      nativePlayback.current = true
       video.src = episode.url
+      if (resumeAt > 1) video.currentTime = resumeAt
       video.load()
     }
+    const onCanPlay = () => start()
+    video.addEventListener('canplay', onCanPlay)
+    video.addEventListener('progress', onCanPlay)
     return () => {
+      live = false
+      window.clearTimeout(waitTimer.current)
+      video.removeEventListener('canplay', onCanPlay)
+      video.removeEventListener('progress', onCanPlay)
       hls?.destroy()
       video.removeAttribute('src')
       video.load()
     }
-  }, [episode.url])
+  }, [episode.url, resumeAt])
 
   const toggle = () => {
     const video = videoRef.current
     if (!video) return
-    if (video.paused) void video.play().catch(() => setError('这一段暂时安静了，换一段试试。'))
-    else video.pause()
+    if (video.paused) {
+      endedRef.current = false
+      void video.play().catch(() => setError('这一段暂时安静了，换一段试试。'))
+    } else video.pause()
   }
 
   const seek = (value: number) => {
     const video = videoRef.current
     if (!video) return
+    if (endAtRef.current > 8 && value < endAtRef.current - 1) endedRef.current = false
     video.currentTime = value
     setCurrent(value)
     onTime(value)
@@ -107,36 +211,69 @@ export function Player({ episode, resumeAt, onTime, onEnded }: Props) {
     else void stage.requestFullscreen().catch(() => undefined)
   }
 
+  const message = loadError || error
+  const showPlay = !message && (needTap || (!booting && !waiting && !playing))
+
   return (
     <div className="stage" ref={stageRef}>
       <video
         ref={videoRef}
         playsInline
-        preload="metadata"
-        onPlay={() => setPlaying(true)}
+        autoPlay
+        preload="auto"
+        onPlay={() => {
+          window.clearTimeout(waitTimer.current)
+          setPlaying(true)
+          setBooting(false)
+          setWaiting(false)
+          setNeedTap(false)
+        }}
         onPause={() => setPlaying(false)}
+        onWaiting={() => {
+          window.clearTimeout(waitTimer.current)
+          waitTimer.current = window.setTimeout(() => setWaiting(true), 350)
+        }}
+        onPlaying={() => {
+          window.clearTimeout(waitTimer.current)
+          setPlaying(true)
+          setBooting(false)
+          setWaiting(false)
+        }}
         onTimeUpdate={(event) => {
-          const time = event.currentTarget.currentTime
+          const video = event.currentTarget
+          const time = video.currentTime
           setCurrent(time)
           onTime(time)
+          const endAt = endAtRef.current
+          if (endAt > 8 && time >= endAt - 0.35) finish()
         }}
         onLoadedMetadata={(event) => {
           const video = event.currentTarget
-          setDuration(video.duration || 0)
-          if (!resumed.current && resumeAt > 1 && resumeAt < (video.duration || 0) - 1) {
+          const length = video.duration || 0
+          setDuration(length)
+          if (nativePlayback.current && Number.isFinite(length) && length > 8) endAtRef.current = length
+          if (nativePlayback.current && !resumed.current && resumeAt > 1 && length > resumeAt + 3) {
             video.currentTime = resumeAt
             resumed.current = true
           }
         }}
-        onEnded={onEnded}
+        onEnded={finish}
         onError={() => {
-          if (episode.url) setError('画面没有回应。换一段，或稍后再来。')
+          if (episode.url) {
+            setError('画面没有回应。换一段，或稍后再来。')
+            setBooting(false)
+          }
         }}
         onClick={toggle}
       />
-      {error ? <div className="stage-error">{error}</div> : null}
-      {!episode.url && !error ? <div className="stage-error">正在把画面请过来…</div> : null}
-      {!playing && !error && episode.url ? (
+      {message ? <div className="stage-error">{message}</div> : null}
+      {!message && (booting || waiting) && !needTap ? (
+        <div className="stage-loading" role="status">
+          <span className="stage-spinner" aria-hidden />
+          <p>{booting ? '正在加载中' : '正在缓冲…'}</p>
+        </div>
+      ) : null}
+      {showPlay ? (
         <button type="button" className="stage-center" onClick={toggle} aria-label="播放">
           ▶
         </button>

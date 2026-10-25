@@ -15,28 +15,28 @@ type Props = {
 
 export function PlayPage({ id, ep, onLibraryChange }: Props) {
   const [item, setItem] = useState<VideoItem | undefined>(() => getVideo(id))
-  const [playUrl, setPlayUrl] = useState('')
-  const [lineName, setLineName] = useState('')
+  const [stream, setStream] = useState({ key: '', url: '', line: '' })
   const [error, setError] = useState('')
   const [pick, setPick] = useState<{ id: string; ep: number; path: string } | null>(null)
   const savedAt = useRef(0)
+  const warmed = useRef('')
   const index = item && item.episodes.length ? Math.min(Math.max(ep, 0), item.episodes.length - 1) : Math.max(ep, 0)
   const episode = item?.episodes[index]
   const history = item ? historyOf(item.id) : undefined
   const resumeAt = history && history.ep === index ? history.time : 0
   const forced = pick && pick.id === id && pick.ep === index ? pick.path : ''
+  const streamKey = `${id}:${index}:${forced}`
+  const playUrl = error ? '' : stream.key === streamKey ? stream.url : episode?.url || ''
+  const lineName = stream.key === streamKey ? stream.line : episode?.line || ''
 
   useEffect(() => {
     let live = true
     setError('')
-    setPlayUrl('')
-    setLineName('')
     ensurePlayUrl(id, index, forced)
       .then((result) => {
         if (!live) return
         setItem(getVideo(id))
-        setPlayUrl(result.url)
-        setLineName(result.line)
+        setStream({ key: streamKey, url: result.url, line: result.line })
       })
       .catch((reason: unknown) => {
         if (live) setError(reason instanceof Error ? reason.message : '这一段还没到来')
@@ -44,7 +44,7 @@ export function PlayPage({ id, ep, onLibraryChange }: Props) {
     return () => {
       live = false
     }
-  }, [id, index, forced])
+  }, [id, index, forced, streamKey])
 
   useEffect(() => {
     if (!item) return
@@ -52,14 +52,18 @@ export function PlayPage({ id, ep, onLibraryChange }: Props) {
     onLibraryChange()
   }, [item, index, onLibraryChange, resumeAt])
 
-  if (error) return <div className="wrap empty">{error}</div>
-  if (!item || !episode) return <div className="wrap empty">正在把这一段请到眼前…</div>
+  if (!item || !episode) return <div className="wrap empty">{error || '正在加载中'}</div>
 
   const remember = (time: number) => {
     const now = Date.now()
     if (now - savedAt.current < 1500) return
     savedAt.current = now
     rememberPlay(item.id, index, time)
+    const warmKey = `${item.id}:${index}`
+    if (time > 40 && warmed.current !== warmKey && index < item.episodes.length - 1) {
+      warmed.current = warmKey
+      void ensurePlayUrl(item.id, index + 1).catch(() => undefined)
+    }
   }
 
   return (
@@ -67,12 +71,14 @@ export function PlayPage({ id, ep, onLibraryChange }: Props) {
       <div className="wrap play-layout">
         <div>
           <Player
-            episode={{ ...episode, url: playUrl || episode.url }}
-            resumeAt={resumeAt}
+            key={streamKey}
+            episode={{ ...episode, url: playUrl }}
+            resumeAt={playUrl ? resumeAt : 0}
+            loadError={error}
             onTime={remember}
             onEnded={() => {
               if (index < item.episodes.length - 1) {
-                location.hash = href({ name: 'play', id: item.id, ep: index + 1 })
+                window.location.hash = href({ name: 'play', id: item.id, ep: index + 1 })
               }
             }}
           />

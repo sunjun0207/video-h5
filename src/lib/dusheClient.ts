@@ -187,8 +187,8 @@ function parseCarousel(html: string): VideoItem[] {
 
 function lineRank(label = '', note = ''): number {
   const text = `${label} ${note}`
-  if (/4K|超清/.test(text)) return 40
-  if (/播放快/.test(text)) return 0
+  if (/4K|超清|蓝光|1080|原画/.test(text)) return 40
+  if (/极速|播放快|流畅/.test(text)) return 0
   if (/标清/.test(text)) return 1
   if (/720/.test(text)) return 2
   if (/大陆/.test(text)) return 3
@@ -348,9 +348,10 @@ function chooseVariant(text: string, playlistUrl: string): string {
     variants.push({ bandwidth, url: new URL(uri, playlistUrl).href })
   }
   if (!variants.length) return playlistUrl
-  const usable = variants.filter((item) => item.bandwidth >= 400000 && item.bandwidth <= 2_500_000)
+  const target = 900_000
+  const usable = variants.filter((item) => item.bandwidth >= 350_000 && item.bandwidth <= 1_600_000)
   const pool = usable.length ? usable : variants
-  return pool.sort((a, b) => a.bandwidth - b.bandwidth)[0].url
+  return pool.sort((a, b) => Math.abs(a.bandwidth - target) - Math.abs(b.bandwidth - target))[0].url
 }
 
 async function readPlaylist(upstream: string): Promise<{ text: string; url: string }> {
@@ -370,23 +371,39 @@ function looksLikeMedia(buf: Uint8Array): boolean {
 async function readLimited(
   url: string,
   ms: number,
-): Promise<{ bytes: Uint8Array; aborted: boolean; size: number; headerSize: number }> {
-  const response = await fetch(url)
-  if (!response.ok || !response.body) throw new Error('片段没有回应')
+  maxBytes = 1600 * 1024,
+  minMs = 2200,
+): Promise<{ bytes: Uint8Array; aborted: boolean; capped: boolean; size: number; headerSize: number }> {
+  const controller = new AbortController()
+  const timer = window.setTimeout(() => controller.abort(), ms)
+  let response: Response
+  try {
+    response = await fetch(url, { signal: controller.signal })
+  } catch {
+    window.clearTimeout(timer)
+    return { bytes: new Uint8Array(), aborted: true, capped: false, size: 0, headerSize: 0 }
+  }
+  if (!response.ok || !response.body) {
+    window.clearTimeout(timer)
+    throw new Error('片段没有回应')
+  }
   const reader = response.body.getReader()
   const chunks: Uint8Array[] = []
   let total = 0
   let aborted = false
-  const timer = window.setTimeout(() => {
-    aborted = true
-    void reader.cancel()
-  }, ms)
+  let capped = false
+  const started = Date.now()
   try {
     while (true) {
       const step = await reader.read()
       if (step.done) break
       chunks.push(step.value)
       total += step.value.length
+      if (total >= maxBytes && Date.now() - started >= minMs) {
+        capped = true
+        void reader.cancel()
+        break
+      }
     }
   } catch {
     aborted = true
@@ -400,10 +417,10 @@ async function readLimited(
     offset += chunk.length
   }
   const headerSize = Number(response.headers.get('content-length') || 0)
-  return { bytes, aborted, size: headerSize || total, headerSize }
+  return { bytes, aborted, capped, size: headerSize || total, headerSize }
 }
 
-type ProbeEntry = PlayLine & { mediaUrl?: string; ratio?: number }
+type ProbeEntry = PlayLine & { mediaUrl?: string; playUrl?: string; ratio?: number; bitrate?: number }
 
 async function probeEntry(entry: PlayLine): Promise<ProbeEntry | null> {
   const html = await fetchHtml(entry.playPath)
@@ -412,24 +429,31 @@ async function probeEntry(entry: PlayLine): Promise<ProbeEntry | null> {
   const variantUrl = chooseVariant(playlist.text, playlist.url)
   const media = variantUrl === playlist.url ? playlist : await readPlaylist(variantUrl)
   const rows = media.text.split(/\r?\n/)
-  let duration = 0
-  let segment = ''
+  const segments: { duration: number; url: string }[] = []
   for (let index = 0; index < rows.length; index += 1) {
     if (!rows[index].startsWith('#EXTINF:')) continue
-    duration = Number.parseFloat(rows[index].slice(8))
-    segment = (rows[index + 1] || '').trim()
-    if (segment && !segment.startsWith('#')) break
+    const duration = Number.parseFloat(rows[index].slice(8))
+    const uri = (rows[index + 1] || '').trim()
+    if (!uri || uri.startsWith('#') || !duration) continue
+    segments.push({ duration, url: uri })
   }
-  if (!segment || !duration) return null
-  const segmentUrl = new URL(segment, media.url).href
+  const sample = segments[Math.min(6, Math.max(segments.length - 1, 0))]
+  if (!sample) return null
+  const segmentUrl = new URL(sample.url, media.url).href
   const started = Date.now()
-  const { bytes, aborted, size, headerSize } = await readLimited(playProxy(segmentUrl), 8000)
+  const { bytes, aborted, capped, size, headerSize } = await readLimited(playProxy(segmentUrl), 4500)
   const elapsed = Math.max((Date.now() - started) / 1000, 0.05)
-  if (!looksLikeMedia(bytes) || !size || (aborted && !headerSize)) return null
+  if (!looksLikeMedia(bytes) || !size || (aborted && !headerSize && !capped)) return null
+  const ratio = headerSize
+    ? (bytes.length * sample.duration) / (elapsed * (headerSize || size))
+    : (bytes.length * 8) / (elapsed * 800_000)
+  const bitrate = sample.duration > 0 ? ((headerSize || size) * 8) / sample.duration : 0
   return {
     ...entry,
     mediaUrl: media.url,
-    ratio: (bytes.length * duration) / (elapsed * size),
+    playUrl: media.url,
+    ratio,
+    bitrate,
   }
 }
 
@@ -483,23 +507,29 @@ export async function loadPlay(entries: PlayLine[], only = false): Promise<{ url
       count += 1
     }
   }
+  const heavy = (text: string) => /蓝光|4K|超清|1080|原画/.test(text)
   if (only) picked.push(ranked[0])
-  take((text) => /播放快|标清|720/.test(text), 2)
-  take((text) => /大陆|香港/.test(text), 2)
-  take(() => true, 6)
+  take((text) => /标清/.test(text) && !heavy(text), 2)
+  take((text) => /720/.test(text) && !heavy(text), 2)
+  take((text) => /极速|播放快|流畅/.test(text) && !heavy(text), 2)
+  take((text) => /大陆/.test(text) && !heavy(text), 1)
+  take((text) => !heavy(text), 6)
+  if (!picked.length) take(() => true, 3)
   let pool: ProbeEntry[] = []
-  for (let offset = 0; offset < picked.length; offset += 3) {
-    const found = (await Promise.all(picked.slice(offset, offset + 3).map((entry) => probeEntry(entry).catch(() => null)))).filter(
-      (item): item is ProbeEntry => Boolean(item?.mediaUrl),
-    )
-    pool = pool.concat(found)
-    if (only || pool.some((item) => (item.ratio || 0) >= 2)) break
+  for (const entry of picked) {
+    const found = await probeEntry(entry).catch(() => null)
+    if (!found?.playUrl) continue
+    pool.push(found)
+    if (!only && (found.ratio || 0) >= 1.3) break
   }
   if (!pool.length) throw new Error('这一集没有可播放的线路')
-  pool.sort((a, b) => (b.ratio || 0) - (a.ratio || 0))
-  const best = pool[0]
+  const sustainable = pool.filter((item) => (item.ratio || 0) >= 1.05)
+  const best = (sustainable.length ? sustainable : pool).sort((a, b) => {
+    if (sustainable.length) return (a.bitrate || Infinity) - (b.bitrate || Infinity)
+    return (b.ratio || 0) - (a.ratio || 0)
+  })[0]
   const value = {
-    url: absolutePlayUrl(best.mediaUrl || ''),
+    url: absolutePlayUrl(best.playUrl || best.mediaUrl || ''),
     line: [best.label, best.note].filter(Boolean).join(' · '),
   }
   playCache.set(key, { at: Date.now(), value })
