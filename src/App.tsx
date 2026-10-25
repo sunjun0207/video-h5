@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useState } from 'react'
 import { BottomNav } from './components/BottomNav'
 import { ChannelNav } from './components/ChannelNav'
 import { Header } from './components/Header'
@@ -8,8 +8,9 @@ import { ChannelPage } from './pages/ChannelPage'
 import { DetailPage } from './pages/DetailPage'
 import { HomePage } from './pages/HomePage'
 import { LibraryPage } from './pages/LibraryPage'
-import { PlayPage } from './pages/PlayPage'
 import { SearchPage } from './pages/SearchPage'
+
+const PlayPage = lazy(() => import('./pages/PlayPage').then((mod) => ({ default: mod.PlayPage })))
 
 function readRoute(): Route {
   return parseHash(window.location.hash)
@@ -57,7 +58,11 @@ export default function App() {
         {route.name === 'detail' ? (
           <DetailPage id={route.id} libraryVersion={libraryVersion} onLibraryChange={bump} />
         ) : null}
-        {route.name === 'play' ? <PlayPage id={route.id} ep={route.ep} onLibraryChange={bump} /> : null}
+        {route.name === 'play' ? (
+          <Suspense fallback={<div className="wrap empty">正在把这一段请到眼前…</div>}>
+            <PlayPage id={route.id} ep={route.ep} onLibraryChange={bump} />
+          </Suspense>
+        ) : null}
         {route.name === 'favorite' ? (
           <LibraryPage mode="favorite" libraryVersion={libraryVersion} onLibraryChange={bump} />
         ) : null}

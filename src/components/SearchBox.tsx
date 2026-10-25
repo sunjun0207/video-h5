@@ -18,6 +18,7 @@ export function SearchBox({ value, onChange, onSubmit }: Props) {
   const [open, setOpen] = useState(false)
   const [items, setItems] = useState<VideoItem[]>([])
   const [active, setActive] = useState(0)
+  const [pending, setPending] = useState(false)
 
   useEffect(() => {
     void ensureLibrary().catch(() => undefined)
@@ -27,10 +28,13 @@ export function SearchBox({ value, onChange, onSubmit }: Props) {
     const q = value.trim()
     if (!open || q.length < 1) {
       setItems([])
+      setPending(false)
       return
     }
     let live = true
     setItems(suggestVideos(q))
+    setActive(0)
+    setPending(true)
     const timer = window.setTimeout(() => {
       searchRemote(q)
         .then((remote) => {
@@ -46,7 +50,10 @@ export function SearchBox({ value, onChange, onSubmit }: Props) {
           setActive(0)
         })
         .catch(() => undefined)
-    }, 280)
+        .finally(() => {
+          if (live) setPending(false)
+        })
+    }, 140)
     return () => {
       live = false
       window.clearTimeout(timer)
@@ -92,14 +99,14 @@ export function SearchBox({ value, onChange, onSubmit }: Props) {
           onKeyDown={onKey}
           placeholder="搜索影片"
           aria-label="搜索影片"
-          aria-expanded={open && items.length > 0}
+          aria-expanded={open && (items.length > 0 || pending)}
           aria-controls={listId}
           autoComplete="off"
         />
         <small>输入片名或演员</small>
       </form>
-      {open && items.length ? (
-        <ul className="suggest" id={listId} role="listbox">
+      {open && (items.length > 0 || pending) ? (
+        <ul className="suggest" id={listId} role="listbox" aria-busy={pending}>
           {items.map((item, index) => (
             <li key={item.id}>
               <a
@@ -120,6 +127,7 @@ export function SearchBox({ value, onChange, onSubmit }: Props) {
               </a>
             </li>
           ))}
+          {pending ? <li className="suggest-pending">正在联想…</li> : null}
         </ul>
       ) : null}
     </div>

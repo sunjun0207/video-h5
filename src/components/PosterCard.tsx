@@ -4,11 +4,19 @@ import { href } from '../lib/router'
 
 type Props = {
   item: VideoItem
+  anchorId?: string
+  marked?: boolean
+  onOpen?: () => void
 }
 
-export function PosterCard({ item }: Props) {
+export function PosterCard({ item, anchorId, marked, onOpen }: Props) {
   return (
-    <a className="poster" href={href({ name: 'detail', id: item.id })}>
+    <a
+      id={anchorId}
+      className={marked ? 'poster spot' : 'poster'}
+      href={href({ name: 'detail', id: item.id })}
+      onClick={onOpen}
+    >
       <span className="poster-art" style={{ background: `linear-gradient(155deg, ${item.tone[0]}, ${item.tone[1]})` }}>
         {item.cover ? <Cover src={item.cover} /> : <i>{item.mark}</i>}
         {item.badge ? <em className="poster-badge">{item.badge}</em> : null}

@@ -76,3 +76,27 @@ export function historyOf(id: string): HistoryItem | undefined {
 export function clearHistory() {
   writeJson(KEYS.history, [])
 }
+
+const SEARCH_SPOT = 'video_h5_search_spot'
+
+export function markSearchSpot(q: string, id: string) {
+  const text = q.trim()
+  if (!text || !id) return
+  sessionStorage.setItem(SEARCH_SPOT, JSON.stringify({ q: text, id }))
+}
+
+export function readSearchSpot(q: string): string | null {
+  try {
+    const raw = sessionStorage.getItem(SEARCH_SPOT)
+    if (!raw) return null
+    const spot = JSON.parse(raw) as { q?: string; id?: string }
+    if (spot.q !== q.trim() || !spot.id) return null
+    return spot.id
+  } catch {
+    return null
+  }
+}
+
+export function clearSearchSpot() {
+  sessionStorage.removeItem(SEARCH_SPOT)
+}

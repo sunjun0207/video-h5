@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { href } from '../lib/router'
 import { searchRemote } from '../lib/source'
-import { clearSearchHistory, getSearchHistory, removeSearchHistory } from '../lib/storage'
+import { clearSearchHistory, clearSearchSpot, getSearchHistory, markSearchSpot, readSearchSpot, removeSearchHistory } from '../lib/storage'
 import type { VideoItem } from '../lib/types'
 import { PosterCard } from '../components/PosterCard'
 import { SearchBox } from '../components/SearchBox'
@@ -17,8 +17,10 @@ export function SearchPage({ keyword, libraryVersion, onLibraryChange, onSearch 
   const q = keyword.trim()
   const [draft, setDraft] = useState(q)
   const [list, setList] = useState<VideoItem[]>([])
-  const [pending, setPending] = useState(false)
+  const [pending, setPending] = useState(Boolean(q))
   const [error, setError] = useState('')
+  const [spotId, setSpotId] = useState('')
+  const [loadedFor, setLoadedFor] = useState('')
   const history = getSearchHistory()
   void libraryVersion
 
@@ -29,7 +31,9 @@ export function SearchPage({ keyword, libraryVersion, onLibraryChange, onSearch 
   useEffect(() => {
     if (!q) {
       setList([])
+      setLoadedFor('')
       setError('')
+      setPending(false)
       return
     }
     let live = true
@@ -37,7 +41,9 @@ export function SearchPage({ keyword, libraryVersion, onLibraryChange, onSearch 
     setError('')
     searchRemote(q)
       .then((items) => {
-        if (live) setList(items)
+        if (!live) return
+        setList(items)
+        setLoadedFor(q)
       })
       .catch((reason: unknown) => {
         if (live) setError(reason instanceof Error ? reason.message : '搜索失败')
@@ -49,6 +55,26 @@ export function SearchPage({ keyword, libraryVersion, onLibraryChange, onSearch 
       live = false
     }
   }, [q])
+
+  useEffect(() => {
+    setSpotId('')
+  }, [q])
+
+  useEffect(() => {
+    if (pending || !q || loadedFor !== q) return
+    const id = readSearchSpot(q)
+    if (!id) return
+    if (!list.some((item) => item.id === id)) {
+      clearSearchSpot()
+      return
+    }
+    const frame = window.requestAnimationFrame(() => {
+      document.getElementById(`search-item-${id}`)?.scrollIntoView({ block: 'center' })
+      setSpotId(id)
+      clearSearchSpot()
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [pending, q, list, loadedFor])
 
   return (
     <div className="page">
@@ -107,7 +133,13 @@ export function SearchPage({ keyword, libraryVersion, onLibraryChange, onSearch 
             <p className="result-count">遇见 {list.length} 部</p>
             <div className="poster-grid">
               {list.map((item) => (
-                <PosterCard key={item.id} item={item} />
+                <PosterCard
+                  key={item.id}
+                  item={item}
+                  anchorId={`search-item-${item.id}`}
+                  marked={item.id === spotId}
+                  onOpen={() => markSearchSpot(q, item.id)}
+                />
               ))}
             </div>
           </>

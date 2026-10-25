@@ -179,6 +179,7 @@ button { cursor: pointer; }
 .suggest strong, .suggest small { display: block; }
 .suggest strong { font-size: 14px; }
 .suggest small { margin-top: 2px; color: var(--muted); font-size: 12px; }
+.suggest-pending { padding: 8px 10px 6px; color: var(--muted); font-size: 12px; }
 
 .hero { position: relative; }
 .hero-stage {
@@ -255,7 +256,8 @@ button { cursor: pointer; }
 .block-actions { display: flex; gap: 8px; }
 .text-btn { border: 0; background: transparent; color: var(--teal-deep); padding: 4px 2px; }
 .poster-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px 10px; margin-top: 12px; }
-.poster { display: block; min-width: 0; }
+.poster { display: block; min-width: 0; scroll-margin: 96px 0 calc(var(--nav-h) + 24px); }
+.poster.spot .poster-art { outline: 2px solid var(--teal); outline-offset: 3px; }
 .poster-art {
   position: relative; display: grid; place-items: center; aspect-ratio: 3 / 4;
   border-radius: 14px; overflow: hidden; color: #fff;
