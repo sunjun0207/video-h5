@@ -1,0 +1,42 @@
+# video-h5 本地 Docker 联调:用 .env.local 构建,nginx 纯 HTTP 托管 + /api-video-pomelo7-server/* 反代。
+#
+# 构建:npm run docker:local:build
+# 启动:npm run docker:local:up      → http://localhost:8090
+# 日志:npm run docker:local:logs
+# 停止:npm run docker:local:down
+#
+# 端口可用环境变量覆盖:HTTP_PORT=9000 npm run docker:local:up
+# 三个 compose 文件使用不同的 project name,互不干扰。默认 8090,避免和 fmusic-h5 的 8080 冲突。
+
+name: video-h5-local
+
+services:
+  video-h5:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BUILD_MODE: local
+        NPM_REGISTRY: https://registry.npmmirror.com
+        ALPINE_APK_REPO_MIRROR: https://mirrors.aliyun.com
+    image: video-h5:local
+    container_name: video-h5-local
+    restart: unless-stopped
+    env_file:
+      - .env.local
+    environment:
+      TZ: Asia/Shanghai
+      SSL_ENABLED: 'false'
+      SERVER_NAME: _
+    ports:
+      - '${HTTP_PORT:-8090}:80'
+    healthcheck:
+      test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1/healthz']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 128M

@@ -1,0 +1,54 @@
+# video-h5 测试 / 开发服务器:用 .env.dev 构建,nginx 终结 TLS 并反代 /api-video-pomelo7-server/*。
+#
+# 构建:npm run docker:dev:build
+# 启动:npm run docker:dev:up
+# 日志:npm run docker:dev:logs
+# 停止:npm run docker:dev:down
+#
+# HTTPS:把 PEM 放到 docker/dev/ssl/(已 .gitignore):
+#   fullchain.pem = 服务器证书 + 中间证书;privkey.pem = 私钥。
+#   若只有 cert.pem + chain.pem:cat cert.pem chain.pem > fullchain.pem
+#   没有证书时可临时把 SSL_ENABLED 改为 'false' 并注释 443 端口与 ssl 卷。
+#
+# 域名 / 端口:
+#   SERVER_NAME=video-h5.pomelo7.top HTTP_PORT=80 HTTPS_PORT=443
+# 与 fmusic-h5 默认都占用 80/443,同一台机器不要同时以默认端口启动两套,或用 HTTP_PORT / HTTPS_PORT 错开。
+
+name: video-h5-dev
+
+services:
+  video-h5:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BUILD_MODE: dev
+        NPM_REGISTRY: https://registry.npmmirror.com
+        ALPINE_APK_REPO_MIRROR: https://mirrors.aliyun.com
+    image: video-h5:dev
+    container_name: video-h5-dev
+    restart: unless-stopped
+    env_file:
+      - .env.dev
+    environment:
+      TZ: Asia/Shanghai
+      SSL_ENABLED: 'true'
+      SERVER_NAME: ${SERVER_NAME:-_}
+    ports:
+      - '${HTTP_PORT:-80}:80'
+      - '${HTTPS_PORT:-443}:443'
+    volumes:
+      - ./docker/dev/ssl/fullchain.pem:/etc/nginx/ssl/fullchain.pem:ro
+      - ./docker/dev/ssl/privkey.pem:/etc/nginx/ssl/privkey.pem:ro
+      # certbot --webroot 续期时打开:
+      # - ./docker/dev/certbot-www:/var/www/certbot:ro
+    healthcheck:
+      test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1/healthz']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 256M

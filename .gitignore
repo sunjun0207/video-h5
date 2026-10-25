@@ -1,0 +1,15 @@
+node_modules
+dist
+.DS_Store
+.vscode
+.idea
+
+# .env.local / .env.dev / .env.pro 为共享配置，需要提交
+.env
+.env.*.local
+
+# Docker TLS 证书(fullchain.pem / privkey.pem 放 docker/{local,dev,pro}/ssl/,勿提交;local 为自签)
+docker/*/ssl/*.pem
+docker/*/ssl/*.key
+docker/*/ssl/*.crt
+docker/*/certbot-www

@@ -1,0 +1,74 @@
+# video-h5 本地 HTTPS 联调:用 .env.local 构建,nginx 用自签证书终结 TLS。
+#
+# 1. 生成自签证书(只需一次,输出到 docker/local/ssl/):
+#      npm run docker:local:https:cert
+# 2. 构建并启动:
+#      npm run docker:local:https:build
+#      npm run docker:local:https:up
+#    访问 https://localhost:8444
+#    http://localhost:8091 会 301 跳转到 https://localhost:8444
+# 3. 停止:npm run docker:local:https:down
+#
+# 默认端口 8091 / 8444,与本项目 HTTP 8090、fmusic-h5 的 8081 / 8443 都不冲突。
+# 改 HTTPS_PORT 时需同步改 HTTPS_REDIRECT_PORT。
+
+name: video-h5-local-https
+
+services:
+  video-h5:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BUILD_MODE: local
+        NPM_REGISTRY: https://registry.npmmirror.com
+        ALPINE_APK_REPO_MIRROR: https://mirrors.aliyun.com
+    image: video-h5:local
+    container_name: video-h5-local-https
+    restart: unless-stopped
+    env_file:
+      - .env.local
+    environment:
+      TZ: Asia/Shanghai
+      SSL_ENABLED: 'true'
+      SERVER_NAME: localhost
+      HTTPS_REDIRECT_PORT: ':${HTTPS_PORT:-8444}'
+      HSTS_HEADER: ''
+    ports:
+      - '${HTTP_PORT:-8091}:80'
+      - '${HTTPS_PORT:-8444}:443'
+    volumes:
+      - ./docker/local/ssl/fullchain.pem:/etc/nginx/ssl/fullchain.pem:ro
+      - ./docker/local/ssl/privkey.pem:/etc/nginx/ssl/privkey.pem:ro
+    healthcheck:
+      test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1/healthz']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+
+  gen-cert:
+    image: alpine/openssl
+    profiles: ['tools']
+    volumes:
+      - ./docker/local/ssl:/out
+    command:
+      - req
+      - -x509
+      - -newkey
+      - rsa:2048
+      - -nodes
+      - -days
+      - '365'
+      - -subj
+      - /CN=localhost
+      - -addext
+      - subjectAltName=DNS:localhost,IP:127.0.0.1
+      - -keyout
+      - /out/privkey.pem
+      - -out
+      - /out/fullchain.pem

@@ -1,0 +1,51 @@
+# video-h5 生产:用 .env.pro 构建,nginx 终结 TLS 并反代 /api-video-pomelo7-server/*。
+#
+# 构建:npm run docker:pro:build
+#   (基础镜像可覆盖:docker compose -f docker-compose.pro.yml build \
+#      --build-arg NODE_IMAGE=xxx/node:20-alpine --build-arg NGINX_IMAGE=xxx/nginx:1.27-alpine)
+# 启动:npm run docker:pro:up
+# 日志:npm run docker:pro:logs
+# 停止:npm run docker:pro:down
+#
+# HTTPS:证书放 docker/pro/ssl/fullchain.pem + privkey.pem(已 .gitignore)。
+# 域名 / 端口:SERVER_NAME=video-h5.pomelo7.top HTTP_PORT=80 HTTPS_PORT=443
+# 与 fmusic-h5 默认都占用 80/443,同一台机器不要同时以默认端口启动两套。
+
+name: video-h5-pro
+
+services:
+  video-h5:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BUILD_MODE: pro
+        NPM_REGISTRY: https://registry.npmmirror.com
+        ALPINE_APK_REPO_MIRROR: https://mirrors.aliyun.com
+    image: video-h5:pro
+    container_name: video-h5
+    restart: unless-stopped
+    env_file:
+      - .env.pro
+    environment:
+      TZ: Asia/Shanghai
+      SSL_ENABLED: 'true'
+      SERVER_NAME: ${SERVER_NAME:-_}
+    ports:
+      - '${HTTP_PORT:-80}:80'
+      - '${HTTPS_PORT:-443}:443'
+    volumes:
+      - ./docker/pro/ssl/fullchain.pem:/etc/nginx/ssl/fullchain.pem:ro
+      - ./docker/pro/ssl/privkey.pem:/etc/nginx/ssl/privkey.pem:ro
+      # certbot --webroot 续期时打开:
+      # - ./docker/pro/certbot-www:/var/www/certbot:ro
+    healthcheck:
+      test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1/healthz']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 256M

@@ -1,0 +1,45 @@
+{
+  "name": "video-h5",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "dev:dev": "vite --mode dev",
+    "dev:pro": "vite --mode pro",
+    "build": "npm run build:pro",
+    "build:local": "tsc --noEmit && vite build",
+    "build:dev": "tsc --noEmit && vite build --mode dev",
+    "build:pro": "tsc --noEmit && vite build --mode pro",
+    "preview": "vite preview --mode pro",
+    "docker:local:build": "docker compose -f docker-compose.local.yml build",
+    "docker:local:up": "docker compose -f docker-compose.local.yml up -d",
+    "docker:local:down": "docker compose -f docker-compose.local.yml down",
+    "docker:local:logs": "docker compose -f docker-compose.local.yml logs -f video-h5",
+    "docker:local:https:cert": "docker compose -f docker-compose.local-https.yml run --rm gen-cert",
+    "docker:local:https:build": "docker compose -f docker-compose.local-https.yml build",
+    "docker:local:https:up": "docker compose -f docker-compose.local-https.yml up -d",
+    "docker:local:https:down": "docker compose -f docker-compose.local-https.yml down",
+    "docker:local:https:logs": "docker compose -f docker-compose.local-https.yml logs -f video-h5",
+    "docker:dev:build": "docker compose -f docker-compose.dev.yml build",
+    "docker:dev:up": "docker compose -f docker-compose.dev.yml up -d",
+    "docker:dev:down": "docker compose -f docker-compose.dev.yml down",
+    "docker:dev:logs": "docker compose -f docker-compose.dev.yml logs -f video-h5",
+    "docker:pro:build": "docker compose -f docker-compose.pro.yml build",
+    "docker:pro:up": "docker compose -f docker-compose.pro.yml up -d",
+    "docker:pro:down": "docker compose -f docker-compose.pro.yml down",
+    "docker:pro:logs": "docker compose -f docker-compose.pro.yml logs -f video-h5"
+  },
+  "dependencies": {
+    "hls.js": "^1.7.3",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "~5.7.2",
+    "vite": "^6.0.0"
+  }
+}
