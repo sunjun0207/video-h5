@@ -7,6 +7,7 @@ import { HeroBanner } from '../components/HeroBanner'
 import { RankList } from '../components/RankList'
 import { SearchBox } from '../components/SearchBox'
 import { SectionRow } from '../components/SectionRow'
+import { Pending } from '../components/Pending'
 
 type Props = {
   onSearch: (keyword: string) => void
@@ -16,7 +17,13 @@ export function HomePage({ onSearch }: Props) {
   const { ready, error } = useCatalog()
   const [keyword, setKeyword] = useState('')
   if (error) return <div className="wrap empty">{error}</div>
-  if (!ready) return <div className="wrap empty">片单还在轻轻赶来，稍等一会儿。</div>
+  if (!ready) {
+    return (
+      <div className="wrap">
+        <Pending text="片单还在轻轻赶来，稍等一会儿。" />
+      </div>
+    )
+  }
   return (
     <div className="page">
       <div className="wrap">

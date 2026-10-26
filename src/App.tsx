@@ -9,6 +9,7 @@ import { DetailPage } from './pages/DetailPage'
 import { HomePage } from './pages/HomePage'
 import { LibraryPage } from './pages/LibraryPage'
 import { SearchPage } from './pages/SearchPage'
+import { Pending } from './components/Pending'
 
 const PlayPage = lazy(() => import('./pages/PlayPage').then((mod) => ({ default: mod.PlayPage })))
 
@@ -59,7 +60,13 @@ export default function App() {
           <DetailPage id={route.id} libraryVersion={libraryVersion} onLibraryChange={bump} />
         ) : null}
         {route.name === 'play' ? (
-          <Suspense fallback={<div className="wrap empty">正在把这一段请到眼前…</div>}>
+          <Suspense
+            fallback={
+              <div className="wrap">
+                <Pending text="正在把这一段请到眼前…" />
+              </div>
+            }
+          >
             <PlayPage id={route.id} ep={route.ep} onLibraryChange={bump} />
           </Suspense>
         ) : null}

@@ -6,6 +6,9 @@ VITE_BASE=/
 VITE_SOURCEMAP=false
 VITE_DEV_PORT=5174
 
+# false：图片和播放直连片源。true：图片和播放也走本站代理。片库页始终走 /api-video-pomelo7-server/vod
+VITE_USE_PROXY=false
+
 VITE_VOD_TARGET=https://www.dushe05.com
 VITE_IMG_TARGET=https://vres.wkcyvs.cn
 VITE_IMG_A_TARGET=https://103.39.111.180:51050

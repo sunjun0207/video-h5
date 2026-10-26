@@ -18,6 +18,35 @@ function playPath(target) {
   return `/api-video-pomelo7-server/play/${scheme}/${target.hostname}/${port}${target.pathname}${target.search}`
 }
 
+function stripInjectedAds(text) {
+  if (!/ppvod-ad-injected/i.test(text)) return text
+  const rows = text.split(/\r?\n/)
+  const kept = []
+  let skipping = false
+  let opened = false
+  for (const line of rows) {
+    if (/ppvod-ad-injected/i.test(line)) {
+      skipping = true
+      opened = false
+      continue
+    }
+    if (!skipping) {
+      kept.push(line)
+      continue
+    }
+    if (line.startsWith('#EXT-X-DISCONTINUITY')) {
+      if (!opened) opened = true
+      else skipping = false
+      continue
+    }
+    if (line.startsWith('#EXT-X-ENDLIST')) {
+      skipping = false
+      kept.push(line)
+    }
+  }
+  return kept.join('\n')
+}
+
 function playProxy(req, res, next) {
   const raw = req.url || ''
   const queryAt = raw.indexOf('?')
@@ -65,6 +94,24 @@ function playProxy(req, res, next) {
         res.setHeader('Location', playPath(nextUrl))
         incoming.resume()
         res.end()
+        return
+      }
+      const playlist = upstreamPath.endsWith('.m3u8') || String(incoming.headers['content-type'] || '').includes('mpegurl')
+      if (playlist) {
+        const chunks = []
+        incoming.on('data', (chunk) => chunks.push(chunk))
+        incoming.on('end', () => {
+          if (res.writableEnded) return
+          let text = Buffer.concat(chunks).toString('utf8')
+          if (text.includes('#EXTM3U')) text = stripInjectedAds(text)
+          const out = { ...incoming.headers }
+          delete out['set-cookie']
+          delete out['content-length']
+          delete out['content-encoding']
+          res.writeHead(incoming.statusCode || 502, out)
+          res.end(text)
+        })
+        res.on('close', () => incoming.destroy())
         return
       }
       const out = { ...incoming.headers }

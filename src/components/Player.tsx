@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import Hls from 'hls.js'
-import { absolutePlayUrl, rewritePlaylist, upstreamFromPlay } from '../lib/mediaProxy'
+import { absolutePlayUrl, rewritePlaylist, upstreamFromPlay, useProxy } from '../lib/mediaProxy'
 import type { Episode } from '../lib/types'
 
 type Props = {
@@ -101,8 +101,9 @@ export function Player({ episode, resumeAt, loadError = '', onTime, onEnded }: P
       const BaseLoader = Hls.DefaultConfig.loader
       class ProxyLoader extends BaseLoader {
         load(context: any, config: any, callbacks: any) {
-          const upstream = upstreamFromPlay(context.url) || context.url
-          if (!String(context.url).includes('/api-video-pomelo7-server/play/')) context.url = absolutePlayUrl(context.url)
+          const original = String(context.url)
+          const upstream = upstreamFromPlay(original) || original
+          if (useProxy) context.url = absolutePlayUrl(upstream)
           const onSuccess = callbacks.onSuccess
           callbacks.onSuccess = (response: { data: unknown }, stats: unknown, ctx: { url: string }, networkDetails?: XMLHttpRequest) => {
             const finalUpstream = upstreamFromPlay(networkDetails?.responseURL || ctx.url) || upstream

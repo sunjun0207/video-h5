@@ -5,6 +5,7 @@ import { clearSearchHistory, clearSearchSpot, getSearchHistory, markSearchSpot, 
 import type { VideoItem } from '../lib/types'
 import { PosterCard } from '../components/PosterCard'
 import { SearchBox } from '../components/SearchBox'
+import { Pending } from '../components/Pending'
 
 type Props = {
   keyword: string
@@ -123,7 +124,7 @@ export function SearchPage({ keyword, libraryVersion, onLibraryChange, onSearch 
             )}
           </section>
         ) : pending ? (
-          <div className="empty">正在轻轻寻找…</div>
+          <Pending text="正在轻轻寻找…" />
         ) : error ? (
           <div className="empty">{error}</div>
         ) : list.length === 0 ? (

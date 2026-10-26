@@ -1,5 +1,5 @@
 import type { ChannelId, PlayLine, VideoItem } from './types'
-import { absolutePlayUrl, coverUrl, playProxy, upstreamFromPlay, vodUrl } from './mediaProxy'
+import { absolutePlayUrl, coverUrl, playProxy, stripInjectedAds, upstreamFromPlay, useProxy, VOD_COOKIE_PATH, vodUrl } from './mediaProxy'
 import { sha1 } from './sha1'
 
 const CHANNELS: { id: ChannelId; name: string; path: string }[] = [
@@ -78,9 +78,18 @@ function solveChallenge(html: string): string {
   return ''
 }
 
+async function openPage(path: string): Promise<Response> {
+  try {
+    return await fetch(vodUrl(path), { credentials: 'same-origin' })
+  } catch (reason) {
+    if (reason instanceof TypeError) throw new Error('片库暂时没有打开')
+    throw reason
+  }
+}
+
 async function ensureCookie(): Promise<void> {
   if (cookieAt && Date.now() - cookieAt < 8 * 60 * 1000) return
-  const response = await fetch(vodUrl('/'), { credentials: 'same-origin' })
+  const response = await openPage('/')
   const html = await response.text()
   if (response.status === 200 && html.includes('/detail/')) {
     cookieAt = Date.now()
@@ -90,21 +99,21 @@ async function ensureCookie(): Promise<void> {
   }
   const solved = solveChallenge(html)
   if (!solved) throw new Error('片库暂时没有打开')
-  document.cookie = `cdndefend_js_cookie=${solved}; path=${'/api-video-pomelo7-server/vod'}`
+  document.cookie = `cdndefend_js_cookie=${solved}; path=${VOD_COOKIE_PATH}`
   cookieAt = Date.now()
 }
 
 async function fetchHtml(path: string): Promise<string> {
   await ensureCookie()
   const read = async () => {
-    const response = await fetch(vodUrl(path), { credentials: 'same-origin' })
+    const response = await openPage(path)
     const html = await response.text()
     return { response, html }
   }
   let { response, html } = await read()
   if (response.status === 850 || html.includes("cdndefend_js_cookie")) {
     cookieAt = 0
-    document.cookie = 'cdndefend_js_cookie=; Max-Age=0; path=/api-video-pomelo7-server/vod'
+    document.cookie = `cdndefend_js_cookie=; Max-Age=0; path=${VOD_COOKIE_PATH}`
     await ensureCookie()
     ;({ response, html } = await read())
   }
@@ -355,8 +364,8 @@ function chooseVariant(text: string, playlistUrl: string): string {
 }
 
 async function readPlaylist(upstream: string): Promise<{ text: string; url: string }> {
-  const response = await fetch(playProxy(upstream))
-  const text = await response.text()
+  const response = await fetch(playProxy(upstream), { credentials: useProxy ? 'same-origin' : 'omit' })
+  const text = stripInjectedAds(await response.text())
   if (!response.ok || !text.includes('#EXTM3U')) throw new Error('播放列表无效')
   return { text, url: upstreamFromPlay(response.url) || upstream }
 }
@@ -378,7 +387,7 @@ async function readLimited(
   const timer = window.setTimeout(() => controller.abort(), ms)
   let response: Response
   try {
-    response = await fetch(url, { signal: controller.signal })
+    response = await fetch(url, { signal: controller.signal, credentials: useProxy ? 'same-origin' : 'omit' })
   } catch {
     window.clearTimeout(timer)
     return { bytes: new Uint8Array(), aborted: true, capped: false, size: 0, headerSize: 0 }
@@ -451,7 +460,7 @@ async function probeEntry(entry: PlayLine): Promise<ProbeEntry | null> {
   return {
     ...entry,
     mediaUrl: media.url,
-    playUrl: media.url,
+    playUrl: absolutePlayUrl(media.url),
     ratio,
     bitrate,
   }

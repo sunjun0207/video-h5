@@ -3,6 +3,7 @@ import { channelFacets, channelName, queryChannel } from '../lib/api'
 import { useCatalog } from '../lib/source'
 import type { ChannelId, SortKey } from '../lib/types'
 import { PosterCard } from '../components/PosterCard'
+import { Pending } from '../components/Pending'
 
 type Props = {
   channel: ChannelId
@@ -32,7 +33,13 @@ export function ChannelPage({ channel }: Props) {
   const list = queryChannel({ channel, genre, region, year, sort })
 
   if (error) return <div className="wrap empty">{error}</div>
-  if (!ready) return <div className="wrap empty">这一栏还在轻轻赶来。</div>
+  if (!ready) {
+    return (
+      <div className="wrap">
+        <Pending text="这一栏还在轻轻赶来。" />
+      </div>
+    )
+  }
 
   return (
     <div className="page">

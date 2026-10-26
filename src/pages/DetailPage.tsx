@@ -6,6 +6,7 @@ import { isFavorite, toggleFavorite } from '../lib/storage'
 import type { VideoItem } from '../lib/types'
 import { Cover } from '../components/Cover'
 import { PosterCard } from '../components/PosterCard'
+import { Pending } from '../components/Pending'
 
 type Props = {
   id: string
@@ -34,7 +35,13 @@ export function DetailPage({ id, libraryVersion, onLibraryChange }: Props) {
   }, [id])
 
   if (error) return <div className="wrap empty">{error}</div>
-  if (!item) return <div className="wrap empty">故事还在路上…</div>
+  if (!item) {
+    return (
+      <div className="wrap">
+        <Pending text="故事还在路上…" />
+      </div>
+    )
+  }
   const saved = isFavorite(item.id)
   void libraryVersion
 

@@ -127,7 +127,16 @@ export function SearchBox({ value, onChange, onSubmit }: Props) {
               </a>
             </li>
           ))}
-          {pending ? <li className="suggest-pending">正在联想…</li> : null}
+          {pending ? (
+            <li className="suggest-pending">
+              <span className="pending-dots" aria-hidden>
+                <i />
+                <i />
+                <i />
+              </span>
+              正在联想…
+            </li>
+          ) : null}
         </ul>
       ) : null}
     </div>

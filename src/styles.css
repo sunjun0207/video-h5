@@ -179,7 +179,58 @@ button { cursor: pointer; }
 .suggest strong, .suggest small { display: block; }
 .suggest strong { font-size: 14px; }
 .suggest small { margin-top: 2px; color: var(--muted); font-size: 12px; }
-.suggest-pending { padding: 8px 10px 6px; color: var(--muted); font-size: 12px; }
+.suggest-pending {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.pending-dots { display: inline-flex; gap: 4px; }
+.pending-dots i, .pending-orb span {
+  display: block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--teal);
+  animation: pending-float 1.05s ease-in-out infinite;
+}
+.pending-dots i:nth-child(2), .pending-orb span:nth-child(2) { animation-delay: 0.16s; background: var(--teal-glow); }
+.pending-dots i:nth-child(3), .pending-orb span:nth-child(3) { animation-delay: 0.32s; }
+.pending {
+  margin-top: 18px;
+  padding: 48px 18px 36px;
+  text-align: center;
+  color: var(--muted);
+}
+.pending-orb {
+  width: 92px;
+  height: 92px;
+  margin: 0 auto 16px;
+  border-radius: 50%;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 8px;
+  padding-bottom: 30px;
+  background:
+    radial-gradient(circle at 50% 58%, rgba(58, 209, 200, 0.42), rgba(26, 166, 160, 0.08) 62%, transparent 72%);
+  animation: pending-pulse 1.8s ease-in-out infinite;
+}
+.pending-orb span { width: 9px; height: 9px; }
+.pending p { margin: 0; line-height: 1.7; }
+@keyframes pending-float {
+  0%, 100% { transform: translateY(0); opacity: 0.35; }
+  50% { transform: translateY(-10px); opacity: 1; }
+}
+@keyframes pending-pulse {
+  0%, 100% { transform: scale(0.96); }
+  50% { transform: scale(1); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .pending-dots i, .pending-orb, .pending-orb span { animation: none; opacity: 1; }
+}
 
 .hero { position: relative; }
 .hero-stage {

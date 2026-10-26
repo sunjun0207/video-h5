@@ -6,6 +6,7 @@ import { historyOf, rememberPlay } from '../lib/storage'
 import type { VideoItem } from '../lib/types'
 import { Player } from '../components/Player'
 import { PosterCard } from '../components/PosterCard'
+import { Pending } from '../components/Pending'
 
 type Props = {
   id: string
@@ -52,7 +53,14 @@ export function PlayPage({ id, ep, onLibraryChange }: Props) {
     onLibraryChange()
   }, [item, index, onLibraryChange, resumeAt])
 
-  if (!item || !episode) return <div className="wrap empty">{error || '正在加载中'}</div>
+  if (!item || !episode) {
+    if (error) return <div className="wrap empty">{error}</div>
+    return (
+      <div className="wrap">
+        <Pending text="正在加载中" />
+      </div>
+    )
+  }
 
   const remember = (time: number) => {
     const now = Date.now()
