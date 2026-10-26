@@ -407,6 +407,12 @@ button { cursor: pointer; }
 .controls button { border: 0; background: transparent; color: #fff; }
 .controls input { flex: 1; accent-color: var(--teal-glow); }
 .controls .time { font-variant-numeric: tabular-nums; font-size: 12px; color: #e7f6f4; }
+.download-row { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin: 10px 0 6px; color: var(--muted); font-size: 13px; }
+.download-progress { font-variant-numeric: tabular-nums; }
+.download-btn {
+  border: 0; border-radius: 999px; padding: 8px 14px; background: var(--teal); color: #fff; font: inherit; cursor: pointer;
+}
+.download-btn:disabled { opacity: 0.5; cursor: default; }
 .play-copy h1 { margin: 8px 0 4px; font-size: 1.45rem; }
 .play-copy p { margin: 4px 0; color: var(--muted); line-height: 1.6; }
 .play-copy .detail-summary { color: #234046; }

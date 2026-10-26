@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { channelName, getVideo, relatedVideos } from '../lib/api'
 import { href } from '../lib/router'
+import { createDownloadControl, downloadEpisode, downloadName, qualityOf, type DownloadControl } from '../lib/download'
 import { ensurePlayUrl } from '../lib/source'
 import { historyOf, rememberPlay } from '../lib/storage'
 import type { VideoItem } from '../lib/types'
@@ -19,8 +20,14 @@ export function PlayPage({ id, ep, onLibraryChange }: Props) {
   const [stream, setStream] = useState({ key: '', url: '', line: '' })
   const [error, setError] = useState('')
   const [pick, setPick] = useState<{ id: string; ep: number; path: string } | null>(null)
+  const [saving, setSaving] = useState(0)
+  const [packing, setPacking] = useState(false)
+  const [savePhase, setSavePhase] = useState<'idle' | 'running' | 'paused'>('idle')
+  const [saveNote, setSaveNote] = useState('')
   const savedAt = useRef(0)
   const warmed = useRef('')
+  const saveControl = useRef<DownloadControl | null>(null)
+  const saveTicket = useRef(0)
   const index = item && item.episodes.length ? Math.min(Math.max(ep, 0), item.episodes.length - 1) : Math.max(ep, 0)
   const episode = item?.episodes[index]
   const history = item ? historyOf(item.id) : undefined
@@ -52,6 +59,62 @@ export function PlayPage({ id, ep, onLibraryChange }: Props) {
     rememberPlay(item.id, index, resumeAt)
     onLibraryChange()
   }, [item, index, onLibraryChange, resumeAt])
+
+  useEffect(() => {
+    setSavePhase('idle')
+    setSaving(0)
+    setPacking(false)
+    setSaveNote('')
+    return () => {
+      saveTicket.current += 1
+      saveControl.current?.cancel()
+      saveControl.current = null
+    }
+  }, [streamKey])
+
+  const saveEpisode = () => {
+    if (savePhase === 'running') {
+      saveControl.current?.pause()
+      setSavePhase('paused')
+      return
+    }
+    if (savePhase === 'paused') {
+      saveControl.current?.resume()
+      setSavePhase('running')
+      return
+    }
+    if (!playUrl || !item || !episode) return
+    const control = createDownloadControl()
+    const ticket = saveTicket.current + 1
+    saveTicket.current = ticket
+    saveControl.current = control
+    setSaveNote('')
+    setSaving(0)
+    setPacking(false)
+    setSavePhase('running')
+    const episodeName = item.episodes.length > 1 ? episode.title : ''
+    downloadEpisode(playUrl, downloadName(item.title, episodeName, qualityOf(lineName)), control, (done, total, stage) => {
+      if (saveTicket.current !== ticket || control.stopped) return
+      if (stage === 'pack') setPacking(true)
+      setSaving(Math.min(100, Math.round((done / total) * 100)))
+    })
+      .then(() => {
+        if (saveTicket.current !== ticket || control.stopped) return
+        saveControl.current = null
+        setSavePhase('idle')
+        setPacking(false)
+        setSaving(0)
+        setSaveNote('已经留下')
+      })
+      .catch((reason: unknown) => {
+        if (saveTicket.current !== ticket || control.stopped) return
+        saveControl.current = null
+        setSavePhase('idle')
+        setPacking(false)
+        setSaving(0)
+        setSaveNote(reason instanceof Error ? reason.message : '暂时收不下来')
+      })
+  }
 
   if (!item || !episode) {
     if (error) return <div className="wrap empty">{error}</div>
@@ -100,6 +163,21 @@ export function PlayPage({ id, ep, onLibraryChange }: Props) {
             <p>
               {[episode.title, lineName, item.year || '', item.region, item.score > 0 ? `${item.score.toFixed(1)} 分` : ''].filter(Boolean).join(' · ')}
             </p>
+            <div className="download-row">
+              {savePhase === 'idle' ? null : (
+                <span className="download-progress">
+                  {savePhase === 'paused'
+                    ? `已暂停，当前进度 ${saving}%`
+                    : packing
+                      ? '正在整理成 mp4'
+                      : `正在下载中，当前进度 ${saving}%`}
+                </span>
+              )}
+              <button type="button" className="download-btn" disabled={savePhase === 'idle' && !playUrl} onClick={saveEpisode}>
+                {savePhase === 'running' ? '暂停' : savePhase === 'paused' ? '继续下载' : '下载'}
+              </button>
+              {savePhase === 'idle' && saveNote ? <span>{saveNote}</span> : null}
+            </div>
             <p className="detail-summary">{item.summary}</p>
           </div>
         </div>
