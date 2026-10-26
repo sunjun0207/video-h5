@@ -1,13 +1,48 @@
 import { useEffect, useRef, useState } from 'react'
 import { channelName, getVideo, relatedVideos } from '../lib/api'
 import { href } from '../lib/router'
-import { createDownloadControl, downloadEpisode, downloadName, qualityOf, type DownloadControl } from '../lib/download'
+import { createDownloadControl, downloadEpisode, downloadName, qualityOf, type DownloadControl, type DownloadProgress } from '../lib/download'
 import { ensurePlayUrl } from '../lib/source'
 import { historyOf, rememberPlay } from '../lib/storage'
 import type { VideoItem } from '../lib/types'
 import { Player } from '../components/Player'
 import { PosterCard } from '../components/PosterCard'
 import { Pending } from '../components/Pending'
+
+const emptyStat: DownloadProgress = { received: 0, total: 0, speed: 0, ratio: 0 }
+
+function formatSize(bytes: number): string {
+  const value = Math.max(0, Number.isFinite(bytes) ? bytes : 0)
+  if (value < 1024) return `${Math.round(value)} B`
+  const kb = value / 1024
+  if (kb < 1024) return `${kb >= 100 ? kb.toFixed(0) : kb.toFixed(1)} KB`
+  const mb = kb / 1024
+  if (mb < 1024) return `${mb >= 100 ? mb.toFixed(1) : mb.toFixed(2)} MB`
+  return `${(mb / 1024).toFixed(2)} GB`
+}
+
+function formatSpeed(bytesPerSecond: number): string {
+  if (bytesPerSecond < 1024) return '0 KB/s'
+  return `${formatSize(bytesPerSecond)}/s`
+}
+
+function formatPercent(ratio: number): string {
+  const value = Math.min(100, Math.max(0, ratio * 100))
+  if (value >= 10) return String(Math.round(value))
+  if (value >= 1) return value.toFixed(1)
+  if (value > 0) return value.toFixed(2)
+  return '0'
+}
+
+function downloadText(phase: 'idle' | 'running' | 'paused', stat: DownloadProgress): string {
+  const percent = formatPercent(stat.ratio)
+  const size = stat.total > 0 ? `${formatSize(stat.received)} / ${formatSize(stat.total)}` : formatSize(stat.received)
+  const head = `已下载 ${percent}% · ${size}`
+  if (stat.stage === 'pack') return `正在整理成 mp4 · ${head}`
+  if (phase === 'paused') return `已暂停 · ${head}`
+  const speed = stat.speed >= 1024 ? formatSpeed(stat.speed) : '测速中'
+  return `${head} · ${speed}`
+}
 
 type Props = {
   id: string
@@ -20,8 +55,7 @@ export function PlayPage({ id, ep, onLibraryChange }: Props) {
   const [stream, setStream] = useState({ key: '', url: '', line: '' })
   const [error, setError] = useState('')
   const [pick, setPick] = useState<{ id: string; ep: number; path: string } | null>(null)
-  const [saving, setSaving] = useState(0)
-  const [packing, setPacking] = useState(false)
+  const [saveStat, setSaveStat] = useState<DownloadProgress>(emptyStat)
   const [savePhase, setSavePhase] = useState<'idle' | 'running' | 'paused'>('idle')
   const [saveNote, setSaveNote] = useState('')
   const savedAt = useRef(0)
@@ -62,8 +96,7 @@ export function PlayPage({ id, ep, onLibraryChange }: Props) {
 
   useEffect(() => {
     setSavePhase('idle')
-    setSaving(0)
-    setPacking(false)
+    setSaveStat(emptyStat)
     setSaveNote('')
     return () => {
       saveTicket.current += 1
@@ -89,29 +122,25 @@ export function PlayPage({ id, ep, onLibraryChange }: Props) {
     saveTicket.current = ticket
     saveControl.current = control
     setSaveNote('')
-    setSaving(0)
-    setPacking(false)
+    setSaveStat(emptyStat)
     setSavePhase('running')
     const episodeName = item.episodes.length > 1 ? episode.title : ''
-    downloadEpisode(playUrl, downloadName(item.title, episodeName, qualityOf(lineName)), control, (done, total, stage) => {
+    downloadEpisode(playUrl, downloadName(item.title, episodeName, qualityOf(lineName)), control, (stat) => {
       if (saveTicket.current !== ticket || control.stopped) return
-      if (stage === 'pack') setPacking(true)
-      setSaving(Math.min(100, Math.round((done / total) * 100)))
+      setSaveStat(stat)
     })
       .then(() => {
         if (saveTicket.current !== ticket || control.stopped) return
         saveControl.current = null
         setSavePhase('idle')
-        setPacking(false)
-        setSaving(0)
+        setSaveStat(emptyStat)
         setSaveNote('已经留下')
       })
       .catch((reason: unknown) => {
         if (saveTicket.current !== ticket || control.stopped) return
         saveControl.current = null
         setSavePhase('idle')
-        setPacking(false)
-        setSaving(0)
+        setSaveStat(emptyStat)
         setSaveNote(reason instanceof Error ? reason.message : '暂时收不下来')
       })
   }
@@ -165,13 +194,18 @@ export function PlayPage({ id, ep, onLibraryChange }: Props) {
             </p>
             <div className="download-row">
               {savePhase === 'idle' ? null : (
-                <span className="download-progress">
-                  {savePhase === 'paused'
-                    ? `已暂停，当前进度 ${saving}%`
-                    : packing
-                      ? '正在整理成 mp4'
-                      : `正在下载中，当前进度 ${saving}%`}
-                </span>
+                <div className="download-meter" role="status">
+                  <div className="download-progress">{downloadText(savePhase, saveStat)}</div>
+                  <div
+                    className="download-bar"
+                    role="progressbar"
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-valuenow={Math.min(100, Math.round(saveStat.ratio * 100))}
+                  >
+                    <span style={{ width: `${Math.min(100, saveStat.ratio * 100)}%` }} />
+                  </div>
+                </div>
               )}
               <button type="button" className="download-btn" disabled={savePhase === 'idle' && !playUrl} onClick={saveEpisode}>
                 {savePhase === 'running' ? '暂停' : savePhase === 'paused' ? '继续下载' : '下载'}

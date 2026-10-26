@@ -1,14 +1,37 @@
 import { API_PREFIX, rewritePlaylist, stripInjectedAds, upstreamFromPlay } from './mediaProxy'
 import { remuxTsBlobs } from './remux'
 
-type Progress = (done: number, total: number, stage?: 'pack') => void
+/** 单文件按区间切开的连接数。播放列表分片更碎，多开几路把等待叠起来。 */
+const FILE_LANES = 8
+const PART_LANES = 16
+const MIN_SLICE = 1024 * 1024
+
+export type DownloadProgress = {
+  received: number
+  total: number
+  speed: number
+  ratio: number
+  stage?: 'pack'
+}
+
+type Progress = (stat: DownloadProgress) => void
 
 function credentialsFor(url: string): RequestCredentials {
   return url.includes(API_PREFIX) ? 'same-origin' : 'omit'
 }
 
-async function pull(url: string, signal: AbortSignal): Promise<Response> {
-  const response = await fetch(url, { signal, credentials: credentialsFor(url) })
+function aborted(): Error {
+  const error = new Error('Aborted')
+  error.name = 'AbortError'
+  return error
+}
+
+function isAbort(reason: unknown): boolean {
+  return reason instanceof Error && reason.name === 'AbortError'
+}
+
+async function pull(url: string, signal: AbortSignal, headers?: HeadersInit): Promise<Response> {
+  const response = await fetch(url, { signal, credentials: credentialsFor(url), headers })
   if (!response.ok) throw new Error('暂时收不下来')
   return response
 }
@@ -48,7 +71,7 @@ function mediaParts(text: string): string[] {
 async function playlist(url: string, signal: AbortSignal): Promise<{ parts: string[]; ext: string }> {
   const response = await pull(url, signal)
   const upstream = upstreamFromPlay(url) || url
-  let text = rewritePlaylist(stripInjectedAds(await response.text()), upstream)
+  const text = rewritePlaylist(stripInjectedAds(await response.text()), upstream)
   if (!text.includes('#EXTM3U')) throw new Error('这一集暂时收不下来')
   if (text.includes('#EXT-X-STREAM-INF')) {
     const next = variantOf(text)
@@ -96,6 +119,7 @@ export type DownloadControl = {
   pause: () => void
   resume: () => void
   cancel: () => void
+  interrupt: () => void
   wait: () => Promise<void>
   readonly signal: AbortSignal
   readonly paused: boolean
@@ -139,6 +163,11 @@ export function createDownloadControl(): DownloadControl {
       waiters = []
       for (const wake of list) wake()
     },
+    interrupt() {
+      if (stopped) return
+      current.abort()
+      current = new AbortController()
+    },
     wait() {
       if (!held || stopped) return Promise.resolve()
       return new Promise((resolve) => {
@@ -148,49 +177,301 @@ export function createDownloadControl(): DownloadControl {
   }
 }
 
-function isAbort(reason: unknown): boolean {
-  return reason instanceof Error && reason.name === 'AbortError'
+function createMeter(onProgress: Progress) {
+  let received = 0
+  let total = 0
+  let share = 0
+  let stage: DownloadProgress['stage']
+  let lastEmit = 0
+  let timer = 0
+  const marks: { at: number; received: number }[] = []
+
+  const speedOf = () => {
+    const now = performance.now()
+    const cutoff = now - 2000
+    while (marks.length > 1 && marks[0].at < cutoff) marks.shift()
+    if (marks.length < 2) return 0
+    const span = (marks[marks.length - 1].at - marks[0].at) / 1000
+    if (span < 0.4) return 0
+    return Math.max(0, (marks[marks.length - 1].received - marks[0].received) / span)
+  }
+
+  const snapshot = (): DownloadProgress => {
+    const shown = total > 0 ? Math.max(total, received) : 0
+    return {
+      received,
+      total: shown,
+      speed: stage === 'pack' ? 0 : speedOf(),
+      ratio: shown > 0 ? Math.min(1, received / shown) : share,
+      stage,
+    }
+  }
+
+  const emit = (force: boolean) => {
+    const now = performance.now()
+    if (!force && now - lastEmit < 200) {
+      if (!timer) {
+        timer = window.setTimeout(() => {
+          timer = 0
+          emit(true)
+        }, 200)
+      }
+      return
+    }
+    lastEmit = now
+    if (timer) {
+      window.clearTimeout(timer)
+      timer = 0
+    }
+    onProgress(snapshot())
+  }
+
+  return {
+    add(bytes: number) {
+      received = Math.max(0, received + bytes)
+      const now = performance.now()
+      const last = marks[marks.length - 1]
+      if (last && now - last.at < 100) last.received = received
+      else marks.push({ at: now, received })
+      emit(false)
+    },
+    setTotal(bytes: number) {
+      if (bytes <= 0) return
+      total = bytes
+      emit(true)
+    },
+    setShare(ratio: number) {
+      share = ratio
+      if (total <= 0) emit(false)
+    },
+    pack() {
+      stage = 'pack'
+      emit(true)
+    },
+    reset() {
+      received = 0
+      total = 0
+      share = 0
+      stage = undefined
+      marks.length = 0
+      emit(true)
+    },
+  }
 }
 
-async function fetchParts(parts: string[], ext: string, filename: string, control: DownloadControl, onProgress: Progress) {
-  const chunks: Blob[] = new Array(parts.length)
-  const pending = parts.map((_, index) => index)
-  let done = 0
-  const workers = Array.from({ length: Math.min(4, parts.length) }, async () => {
-    while (!control.stopped) {
+type Meter = ReturnType<typeof createMeter>
+
+async function readBody(response: Response, control: DownloadControl, onBytes: (bytes: number) => void): Promise<Blob> {
+  const reader = response.body?.getReader()
+  if (!reader) {
+    const data = new Uint8Array(await response.arrayBuffer())
+    if (data.byteLength) onBytes(data.byteLength)
+    return new Blob([data])
+  }
+  const chunks: Uint8Array[] = []
+  try {
+    while (!control.stopped && !control.paused) {
+      const { done, value } = await reader.read()
+      if (done || control.stopped || control.paused) break
+      if (!value?.byteLength) continue
+      chunks.push(value)
+      onBytes(value.byteLength)
+    }
+  } catch (reason) {
+    await reader.cancel().catch(() => undefined)
+    if (isAbort(reason) || control.paused || control.stopped) throw aborted()
+    throw reason
+  }
+  if (control.stopped || control.paused) {
+    await reader.cancel().catch(() => undefined)
+    throw aborted()
+  }
+  return new Blob(chunks)
+}
+
+/** 多路同时拉。暂停只重下当前这一段；某一路失败则停掉其余连接。 */
+async function inLanes(count: number, lanes: number, control: DownloadControl, job: (index: number) => Promise<void>) {
+  const pending = Array.from({ length: count }, (_, index) => index)
+  let dead: unknown = null
+  const workers = Array.from({ length: Math.min(lanes, count) }, async () => {
+    while (!control.stopped && !dead) {
       await control.wait()
-      if (control.stopped) return
+      if (control.stopped || dead) return
       const index = pending.shift()
       if (index === undefined) return
-      if (control.stopped || control.paused) {
-        pending.push(index)
+      if (control.paused) {
+        pending.unshift(index)
         continue
       }
       try {
-        const response = await pull(parts[index], control.signal)
-        const blob = await response.blob()
-        if (control.stopped) return
-        chunks[index] = blob
-        done += 1
-        onProgress(done, parts.length)
+        await job(index)
       } catch (reason) {
-        if (control.stopped) return
-        if (isAbort(reason) || control.paused) {
-          pending.push(index)
+        if (control.stopped || dead) return
+        if (control.paused || isAbort(reason)) {
+          pending.unshift(index)
           continue
         }
-        throw reason
+        dead = reason
+        control.interrupt()
+        return
       }
     }
   })
   await Promise.all(workers)
+  if (dead) throw dead
+}
+
+async function take(url: string, control: DownloadControl, meter: Meter, onSize?: (size: number) => void): Promise<Blob> {
+  let counted = 0
+  let done = false
+  try {
+    const response = await pull(url, control.signal)
+    const length = Number(response.headers.get('content-length') || 0)
+    if (Number.isFinite(length) && length > 0) onSize?.(length)
+    const blob = await readBody(response, control, (bytes) => {
+      counted += bytes
+      meter.add(bytes)
+    })
+    if (!blob.size) throw new Error('暂时收不下来')
+    onSize?.(blob.size)
+    done = true
+    return blob
+  } catch (reason) {
+    if (!done && counted) meter.add(-counted)
+    throw reason
+  }
+}
+
+function totalFromRange(header: string | null): number {
+  const value = Number((header || '').split('/').pop())
+  return Number.isFinite(value) && value > 0 ? value : 0
+}
+
+async function probeRange(url: string, signal: AbortSignal): Promise<{ total: number; ranged: boolean }> {
+  try {
+    const response = await fetch(url, {
+      signal,
+      credentials: credentialsFor(url),
+      headers: { Range: 'bytes=0-0' },
+    })
+    try {
+      if (response.status === 206) {
+        const total = totalFromRange(response.headers.get('content-range'))
+        return { total, ranged: total > 0 }
+      }
+      const total = Number(response.headers.get('content-length') || 0)
+      return { total: Number.isFinite(total) && total > 0 ? total : 0, ranged: false }
+    } finally {
+      await response.body?.cancel().catch(() => undefined)
+    }
+  } catch (reason) {
+    if (isAbort(reason)) throw reason
+    return { total: 0, ranged: false }
+  }
+}
+
+function slicesOf(total: number): Array<{ start: number; end: number }> {
+  const count = Math.max(1, Math.min(FILE_LANES, Math.floor(total / MIN_SLICE)))
+  const size = Math.ceil(total / count)
+  const slices: Array<{ start: number; end: number }> = []
+  for (let start = 0; start < total; start += size) {
+    slices.push({ start, end: Math.min(total - 1, start + size - 1) })
+  }
+  return slices
+}
+
+async function takeSlice(url: string, start: number, end: number, control: DownloadControl, meter: Meter): Promise<Blob> {
+  const expect = end - start + 1
+  let counted = 0
+  let done = false
+  try {
+    const response = await pull(url, control.signal, { Range: `bytes=${start}-${end}` })
+    if (response.status !== 206) {
+      await response.body?.cancel().catch(() => undefined)
+      throw new Error('暂时收不下来')
+    }
+    const blob = await readBody(response, control, (bytes) => {
+      counted += bytes
+      meter.add(bytes)
+    })
+    if (blob.size < expect) throw new Error('暂时收不下来')
+    done = true
+    return blob.size === expect ? blob : blob.slice(0, expect)
+  } catch (reason) {
+    if (!done && counted) meter.add(-counted)
+    throw reason
+  }
+}
+
+async function downloadWhole(url: string, filename: string, control: DownloadControl, meter: Meter) {
+  const probe = await probeRange(url, control.signal)
   if (control.stopped) return
-  if (chunks.some((chunk) => !chunk)) return
+  let blob: Blob
+  if (probe.ranged && probe.total >= MIN_SLICE * 2) {
+    const slices = slicesOf(probe.total)
+    const pieces: Blob[] = new Array(slices.length)
+    meter.setTotal(probe.total)
+    await inLanes(slices.length, slices.length, control, async (index) => {
+      const slice = slices[index]
+      pieces[index] = await takeSlice(url, slice.start, slice.end, control, meter)
+    })
+    if (control.stopped) return
+    if (pieces.some((piece) => !piece)) throw new Error('暂时收不下来')
+    blob = new Blob(pieces, { type: url.includes('.mp4') ? 'video/mp4' : 'video/mp2t' })
+  } else {
+    if (probe.total > 0) meter.setTotal(probe.total)
+    let stored: Blob | null = null
+    await inLanes(1, 1, control, async () => {
+      stored = await take(url, control, meter, (size) => meter.setTotal(size))
+    })
+    if (control.stopped || !stored) return
+    blob = stored
+  }
+  if (url.includes('.mp4')) {
+    saveBlob(blob, `${filename}.mp4`)
+    return
+  }
+  meter.pack()
+  const packed = await remuxTsBlobs([blob], control)
+  if (control.stopped) return
+  saveBlob(packed || blob, `${filename}.${packed ? 'mp4' : 'ts'}`)
+}
+
+async function fetchParts(parts: string[], ext: string, filename: string, control: DownloadControl, meter: Meter) {
+  const chunks: Blob[] = new Array(parts.length)
+  const sizes = new Array<number>(parts.length).fill(0)
+  let sized = 0
+  let sizedBytes = 0
+  let finished = 0
+
+  const rememberSize = (index: number, size: number) => {
+    if (size <= 0 || sizes[index] === size) return
+    if (sizes[index] === 0) sized += 1
+    sizedBytes += size - sizes[index]
+    sizes[index] = size
+    if (sized === parts.length) {
+      meter.setTotal(sizedBytes)
+      return
+    }
+    const samples = sizes.filter((item) => item >= 8 * 1024)
+    if (!samples.length) return
+    const average = samples.reduce((sum, item) => sum + item, 0) / samples.length
+    const missing = parts.length - sized
+    meter.setTotal(Math.round(sizedBytes + average * missing))
+  }
+
+  await inLanes(parts.length, PART_LANES, control, async (index) => {
+    chunks[index] = await take(parts[index], control, meter, (size) => rememberSize(index, size))
+    finished += 1
+    meter.setShare(finished / parts.length)
+  })
+  if (control.stopped) return
+  if (chunks.some((chunk) => !chunk)) throw new Error('暂时收不下来')
   if (ext === 'mp4') {
     saveBlob(new Blob(chunks, { type: 'video/mp4' }), `${filename}.mp4`)
     return
   }
-  onProgress(chunks.length, chunks.length, 'pack')
+  meter.pack()
   const packed = await remuxTsBlobs(chunks, control)
   if (control.stopped) return
   if (packed) {
@@ -202,32 +483,24 @@ async function fetchParts(parts: string[], ext: string, filename: string, contro
 
 /** 按当前播放地址下载。地址已由 VITE_USE_PROXY 决定是片源直连还是本站代理。 */
 export async function downloadEpisode(url: string, filename: string, control: DownloadControl, onProgress: Progress): Promise<void> {
+  const meter = createMeter(onProgress)
   while (!control.stopped) {
     await control.wait()
     if (control.stopped) return
     try {
       if (!url.includes('.m3u8')) {
-        const response = await pull(url, control.signal)
-        const blob = await response.blob()
-        if (control.stopped) return
-        if (url.includes('.mp4')) {
-          saveBlob(blob, `${filename}.mp4`)
-          onProgress(1, 1)
-          return
-        }
-        onProgress(1, 1, 'pack')
-        const packed = await remuxTsBlobs([blob], control)
-        if (control.stopped) return
-        saveBlob(packed || blob, `${filename}.${packed ? 'mp4' : 'ts'}`)
-        onProgress(1, 1)
+        await downloadWhole(url, filename, control, meter)
         return
       }
       const { parts, ext } = await playlist(url, control.signal)
-      await fetchParts(parts, ext, filename, control, onProgress)
+      await fetchParts(parts, ext, filename, control, meter)
       return
     } catch (reason) {
       if (control.stopped) return
-      if (control.paused || isAbort(reason)) continue
+      if (control.paused || isAbort(reason)) {
+        meter.reset()
+        continue
+      }
       throw reason
     }
   }

@@ -408,7 +408,10 @@ button { cursor: pointer; }
 .controls input { flex: 1; accent-color: var(--teal-glow); }
 .controls .time { font-variant-numeric: tabular-nums; font-size: 12px; color: #e7f6f4; }
 .download-row { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin: 10px 0 6px; color: var(--muted); font-size: 13px; }
-.download-progress { font-variant-numeric: tabular-nums; }
+.download-meter { flex: 1 1 260px; min-width: 220px; }
+.download-progress { font-variant-numeric: tabular-nums; color: var(--ink); }
+.download-bar { height: 4px; margin-top: 6px; border-radius: 999px; background: rgba(35, 64, 70, 0.14); overflow: hidden; }
+.download-bar span { display: block; height: 100%; background: var(--teal); }
 .download-btn {
   border: 0; border-radius: 999px; padding: 8px 14px; background: var(--teal); color: #fff; font: inherit; cursor: pointer;
 }
