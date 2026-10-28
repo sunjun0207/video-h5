@@ -43,6 +43,14 @@ export default defineConfig(({ mode }) => {
     },
     build: {
       sourcemap: env.VITE_SOURCEMAP === 'true',
+      /** hls.js 完整版压缩后约 594 kB，只随播放页按需加载。不能换 hls.js/light：它不解析 TS 里的 HEVC。 */
+      chunkSizeWarningLimit: 650,
+      rollupOptions: {
+        output: {
+          /** hls.js 单独成块，业务代码改了也不影响浏览器里缓存的这一块。 */
+          manualChunks: (id) => (/[\\/]node_modules[\\/]hls\.js[\\/]/.test(id) ? 'hls' : undefined),
+        },
+      },
     },
   }
 })
