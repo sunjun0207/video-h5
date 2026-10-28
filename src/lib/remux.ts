@@ -1,11 +1,10 @@
-import muxjs from 'mux.js'
-
-type Gate = {
-  wait: () => Promise<void>
-  readonly stopped: boolean
-}
+import muxjs, { type TimingInfo } from 'mux.js'
+import { probeTs, shiftTimestamps } from './mpegts'
 
 const CLOCK = 90_000
+/** 片段开头比上一段结尾早过这个量，或者晚过 FORWARD，就当时间线断了，接到上一段结尾。 */
+const BACKWARD = CLOCK / 10
+const FORWARD = CLOCK
 
 function readU32(bytes: Uint8Array, offset: number): number {
   return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(offset)
@@ -38,37 +37,70 @@ function patchDurations(init: Uint8Array, seconds: number) {
   walk(0, init.length)
 }
 
-/** 把按顺序排好的 MPEG-TS 片段装成一个 mp4。装不了时返回 null，调用方仍保存 ts。 */
-export async function remuxTsBlobs(chunks: Blob[], gate: Gate): Promise<Blob | null> {
-  const transmuxer = new muxjs.mp4.Transmuxer()
-  const pieces: Uint8Array[] = []
-  let init: Uint8Array | null = null
-  let opened = false
-  let firstPts = 0
-  let lastPts = 0
-  const span = (info: { start: number; end: number }) => {
-    if (!opened) {
-      opened = true
-      firstPts = info.start
+/**
+ * 把按顺序给出的 MPEG-TS 片段装成一个 mp4。
+ * 片段之间时间线跳回或跳空时，把后面的时间戳整体平移接上，成片不会倒回去重播，时长也不会虚长。
+ */
+export class TsRemuxer {
+  private readonly transmuxer = new muxjs.mp4.Transmuxer()
+  private readonly pieces: Blob[] = []
+  private init: Uint8Array | null = null
+  private first: number | null = null
+  private videoEnd: number | null = null
+  private audioEnd: number | null = null
+  private shift = 0
+
+  constructor() {
+    this.transmuxer.on('data', (segment) => {
+      if (!this.init) this.init = segment.initSegment
+      this.pieces.push(new Blob([segment.data]))
+    })
+    this.transmuxer.on('videoTimingInfo', (info) => {
+      this.note(info)
+      this.videoEnd = Math.max(this.videoEnd ?? info.end, info.end)
+    })
+    this.transmuxer.on('audioTimingInfo', (info) => {
+      this.note(info)
+      this.audioEnd = Math.max(this.audioEnd ?? info.end, info.end)
+    })
+  }
+
+  private note(info: TimingInfo) {
+    if (this.first === null || info.start < this.first) this.first = info.start
+  }
+
+  private get end(): number | null {
+    if (this.videoEnd === null) return this.audioEnd
+    if (this.audioEnd === null) return this.videoEnd
+    return Math.max(this.videoEnd, this.audioEnd)
+  }
+
+  /** 两路都接在各自上一段结尾之后，谁也不重叠。 */
+  private shiftAfter(video: number | null, audio: number | null): number | null {
+    const shifts: number[] = []
+    if (video !== null && this.videoEnd !== null) shifts.push(this.videoEnd - video)
+    if (audio !== null && this.audioEnd !== null) shifts.push(this.audioEnd - audio)
+    return shifts.length ? Math.max(...shifts) : null
+  }
+
+  push(bytes: Uint8Array) {
+    const head = probeTs(bytes)
+    const start = head.video ?? head.audio
+    const last = head.video !== null ? this.videoEnd : this.audioEnd
+    if (start !== null && last !== null) {
+      const at = start + this.shift
+      if (at < last - BACKWARD || at > last + FORWARD) this.shift = this.shiftAfter(head.video, head.audio) ?? this.shift
     }
-    if (info.end > lastPts) lastPts = info.end
-  }
-  transmuxer.on('data', (segment) => {
-    if (!init) init = segment.initSegment
-    pieces.push(segment.data)
-  })
-  transmuxer.on('videoTimingInfo', span)
-  transmuxer.on('audioTimingInfo', span)
-
-  for (const chunk of chunks) {
-    await gate.wait()
-    if (gate.stopped) return null
-    transmuxer.push(new Uint8Array(await chunk.arrayBuffer()))
-    transmuxer.flush()
-    await new Promise((resolve) => window.setTimeout(resolve, 0))
+    if (this.shift) shiftTimestamps(bytes, this.shift)
+    this.transmuxer.push(bytes)
+    this.transmuxer.flush()
   }
 
-  if (!init || pieces.length === 0) return null
-  if (lastPts > firstPts) patchDurations(init, (lastPts - firstPts) / CLOCK)
-  return new Blob([init, ...pieces], { type: 'video/mp4' })
+  /** 时长按装出来的时间线算。什么都没装出来时返回 null。 */
+  finish(): Blob | null {
+    const end = this.end
+    if (!this.init || !this.pieces.length || this.first === null || end === null) return null
+    if (end > this.first) patchDurations(this.init, (end - this.first) / CLOCK)
+    return new Blob([this.init, ...this.pieces], { type: 'video/mp4' })
+  }
 }

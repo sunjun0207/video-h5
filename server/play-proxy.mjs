@@ -18,33 +18,74 @@ function playPath(target) {
   return `/api-video-pomelo7-server/play/${scheme}/${target.hostname}/${port}${target.pathname}${target.search}`
 }
 
-function stripInjectedAds(text) {
-  if (!/ppvod-ad-injected/i.test(text)) return text
-  const rows = text.split(/\r?\n/)
-  const kept = []
-  let skipping = false
-  let opened = false
-  for (const line of rows) {
-    if (/ppvod-ad-injected/i.test(line)) {
-      skipping = true
-      opened = false
+const SEGMENT_TAGS = ['#EXTINF', '#EXT-X-BYTERANGE', '#EXT-X-PROGRAM-DATE-TIME', '#EXT-X-GAP', '#EXT-X-BITRATE', '#EXT-X-DATERANGE']
+const REPEAT_MAX = 180
+
+function blocksOf(text) {
+  const blocks = [{ lines: [], uris: [], duration: 0, marked: false }]
+  let markNext = false
+  for (const line of text.split(/\r?\n/)) {
+    const row = line.trim()
+    if (/ppvod-ad-injected/i.test(row)) {
+      markNext = true
       continue
     }
-    if (!skipping) {
-      kept.push(line)
-      continue
+    let block = blocks[blocks.length - 1]
+    if (row === '#EXT-X-DISCONTINUITY') {
+      block = { lines: [], uris: [], duration: 0, marked: markNext }
+      markNext = false
+      blocks.push(block)
+    } else if (row.startsWith('#EXTINF:')) {
+      block.duration += Number.parseFloat(row.slice(8)) || 0
+    } else if (row && !row.startsWith('#')) {
+      block.uris.push(row)
     }
-    if (line.startsWith('#EXT-X-DISCONTINUITY')) {
-      if (!opened) opened = true
-      else skipping = false
-      continue
-    }
-    if (line.startsWith('#EXT-X-ENDLIST')) {
-      skipping = false
-      kept.push(line)
-    }
+    block.lines.push(line)
   }
-  return kept.join('\n')
+  return blocks
+}
+
+function keptOfDropped(lines) {
+  return lines.filter((line) => {
+    const row = line.trim()
+    if (!row.startsWith('#EXT') || row === '#EXT-X-DISCONTINUITY') return false
+    return !SEGMENT_TAGS.some((tag) => row.startsWith(tag))
+  })
+}
+
+/** 与 src/lib/hlsAds.ts 的 stripInjectedAds 保持一致。 */
+function stripInjectedAds(text) {
+  if (!text.includes('#EXTINF')) return text
+  const blocks = blocksOf(text)
+  const counts = new Map()
+  if (!text.includes('#EXT-X-BYTERANGE')) {
+    for (const block of blocks) for (const uri of block.uris) counts.set(uri, (counts.get(uri) || 0) + 1)
+  }
+  const repeated = (block) =>
+    block.duration <= REPEAT_MAX && block.uris.filter((uri) => (counts.get(uri) || 0) > 1).length * 2 > block.uris.length
+  const total = blocks.reduce((sum, block) => sum + block.uris.length, 0)
+  const repeatedParts = blocks.filter(repeated).reduce((sum, block) => sum + block.uris.length, 0)
+  const useRepeats = repeatedParts * 2 < total
+  const drop = blocks.map(
+    (block) => block.uris.length > 0 && (block.marked || block.uris.some((uri) => uri.includes('/adjump/')) || (useRepeats && repeated(block))),
+  )
+  const kept = blocks.reduce((sum, block, index) => sum + (drop[index] ? 0 : block.uris.length), 0)
+  if (!drop.includes(true) || kept === 0) return text
+  const out = []
+  let emitted = false
+  blocks.forEach((block, index) => {
+    if (drop[index]) {
+      out.push(...keptOfDropped(block.lines))
+      return
+    }
+    for (const line of block.lines) {
+      const row = line.trim()
+      if (row === '#EXT-X-DISCONTINUITY' && !emitted) continue
+      if (row && !row.startsWith('#')) emitted = true
+      out.push(line)
+    }
+  })
+  return out.join('\n')
 }
 
 function playProxy(req, res, next) {

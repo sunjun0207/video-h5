@@ -1,3 +1,5 @@
+import { stripInjectedAds } from './hlsAds'
+
 /** 片库页始终走 /vod。图片和播放地址仅在 VITE_USE_PROXY=true 时走本站前缀。 */
 export const API_PREFIX = '/api-video-pomelo7-server'
 
@@ -102,36 +104,6 @@ export function upstreamFromPlay(value: string): string | null {
   const rest = matched[4]
   const omit = (scheme === 'https' && port === '443') || (scheme === 'http' && port === '80')
   return `${scheme}://${host}${omit ? '' : `:${port}`}${rest}`
-}
-
-/** 片源用 `# ppvod-ad-injected` 把广告片插进正片，两头各有一个 DISCONTINUITY。 */
-export function stripInjectedAds(text: string): string {
-  if (!/ppvod-ad-injected/i.test(text)) return text
-  const rows = text.split(/\r?\n/)
-  const kept: string[] = []
-  let skipping = false
-  let opened = false
-  for (const line of rows) {
-    if (/ppvod-ad-injected/i.test(line)) {
-      skipping = true
-      opened = false
-      continue
-    }
-    if (!skipping) {
-      kept.push(line)
-      continue
-    }
-    if (line.startsWith('#EXT-X-DISCONTINUITY')) {
-      if (!opened) opened = true
-      else skipping = false
-      continue
-    }
-    if (line.startsWith('#EXT-X-ENDLIST')) {
-      skipping = false
-      kept.push(line)
-    }
-  }
-  return kept.join('\n')
 }
 
 export function rewritePlaylist(text: string, upstreamUrl: string): string {

@@ -1,5 +1,6 @@
 import type { ChannelId, PlayLine, VideoItem } from './types'
-import { absolutePlayUrl, coverUrl, playProxy, stripInjectedAds, upstreamFromPlay, useProxy, VOD_COOKIE_PATH, vodUrl } from './mediaProxy'
+import { stripInjectedAds } from './hlsAds'
+import { absolutePlayUrl, coverUrl, playProxy, upstreamFromPlay, useProxy, VOD_COOKIE_PATH, vodUrl } from './mediaProxy'
 import { sha1 } from './sha1'
 
 const CHANNELS: { id: ChannelId; name: string; path: string }[] = [

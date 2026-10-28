@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { channelName, getVideo, relatedVideos } from '../lib/api'
 import { href } from '../lib/router'
 import { createDownloadControl, downloadEpisode, downloadName, qualityOf, type DownloadControl, type DownloadProgress } from '../lib/download'
@@ -64,10 +64,13 @@ export function PlayPage({ id, ep, onLibraryChange }: Props) {
   const saveTicket = useRef(0)
   const index = item && item.episodes.length ? Math.min(Math.max(ep, 0), item.episodes.length - 1) : Math.max(ep, 0)
   const episode = item?.episodes[index]
-  const history = item ? historyOf(item.id) : undefined
-  const resumeAt = history && history.ep === index ? history.time : 0
   const forced = pick && pick.id === id && pick.ep === index ? pick.path : ''
   const streamKey = `${id}:${index}:${forced}`
+  /** 只在换集、换线路时读一次续播位置。播放中每 1.5 秒会写回进度，每次渲染都重读会让播放器反复重建。 */
+  const resumeAt = useMemo(() => {
+    const history = historyOf(id)
+    return history && history.ep === index ? history.time : 0
+  }, [id, index, streamKey])
   const playUrl = error ? '' : stream.key === streamKey ? stream.url : episode?.url || ''
   const lineName = stream.key === streamKey ? stream.line : episode?.line || ''
 

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import Hls from 'hls.js'
 import { absolutePlayUrl, rewritePlaylist, upstreamFromPlay, useProxy } from '../lib/mediaProxy'
+import { reportPlayback } from '../lib/playback'
 import type { Episode } from '../lib/types'
 
 type Props = {
@@ -43,6 +44,30 @@ export function Player({ episode, resumeAt, loadError = '', onTime, onEnded }: P
     videoRef.current?.pause()
     onEndedRef.current()
   }
+
+  useEffect(() => {
+    const video = videoRef.current
+    if (!video) return
+    let wants = true
+    const report = (event?: Event) => {
+      const type = event?.type
+      if (type === 'pause' || type === 'ended') wants = false
+      if (type === 'play' || type === 'playing' || type === 'loadstart') wants = true
+      const time = video.currentTime
+      let ahead = 0
+      for (let index = 0; index < video.buffered.length; index += 1) {
+        if (video.buffered.start(index) <= time + 0.5 && time < video.buffered.end(index)) ahead = video.buffered.end(index) - time
+      }
+      reportPlayback({ playing: wants && !video.ended, ahead, stalled: !video.paused && video.readyState < 3 })
+    }
+    const events = ['loadstart', 'play', 'playing', 'pause', 'waiting', 'seeking', 'timeupdate', 'progress', 'ended']
+    for (const name of events) video.addEventListener(name, report)
+    report()
+    return () => {
+      for (const name of events) video.removeEventListener(name, report)
+      reportPlayback({ playing: false, ahead: 0, stalled: false })
+    }
+  }, [])
 
   useEffect(() => {
     resumed.current = false

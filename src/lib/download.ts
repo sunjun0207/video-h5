@@ -1,10 +1,16 @@
-import { API_PREFIX, rewritePlaylist, stripInjectedAds, upstreamFromPlay } from './mediaProxy'
-import { remuxTsBlobs } from './remux'
+import { findAdGroups, type GroupHead } from './hlsAds'
+import { API_PREFIX, rewritePlaylist, upstreamFromPlay } from './mediaProxy'
+import { probeTs, type TsHead } from './mpegts'
+import { downloadLanes } from './playback'
+import { openRemux, type RemuxPipe } from './remuxPipe'
 
-/** 单文件按区间切开的连接数。播放列表分片更碎，多开几路把等待叠起来。 */
+/** 不在播放时最多开几路；在播时按缓冲余量收窄，见 downloadLanes。 */
 const FILE_LANES = 8
-const PART_LANES = 16
+const PART_LANES = 8
 const MIN_SLICE = 1024 * 1024
+/** 读首帧时间和编码只需要片段开头这一段。 */
+const HEAD_BYTES = 256 * 1024
+const CLOCK = 90_000
 
 export type DownloadProgress = {
   received: number
@@ -30,8 +36,13 @@ function isAbort(reason: unknown): boolean {
   return reason instanceof Error && reason.name === 'AbortError'
 }
 
+function sleep(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms))
+}
+
+/** 下载请求都标成低优先级，播放器的分片先走。 */
 async function pull(url: string, signal: AbortSignal, headers?: HeadersInit): Promise<Response> {
-  const response = await fetch(url, { signal, credentials: credentialsFor(url), headers })
+  const response = await fetch(url, { signal, credentials: credentialsFor(url), headers, priority: 'low' })
   if (!response.ok) throw new Error('暂时收不下来')
   return response
 }
@@ -53,36 +64,55 @@ function variantOf(text: string): string {
   return pool.sort((a, b) => Math.abs(a.bandwidth - target) - Math.abs(b.bandwidth - target))[0].url
 }
 
-function mediaParts(text: string): string[] {
-  const rows = text.split(/\r?\n/)
-  const parts: string[] = []
-  for (const row of rows) {
-    const init = row.match(/^#EXT-X-MAP:.*URI="([^"]+)"/)
-    if (init) parts.push(init[1])
+type Part = { url: string; duration: number; group: number }
+type Plan = { init: string; parts: Part[]; ext: 'ts' | 'mp4' }
+
+/** 分片按 DISCONTINUITY 分组，广告总是自成一组。 */
+function mediaPlan(text: string): Plan {
+  let init = ''
+  let group = 0
+  let duration = 0
+  let broken = false
+  const parts: Part[] = []
+  for (const line of text.split(/\r?\n/)) {
+    const row = line.trim()
+    if (!row) continue
+    const map = row.match(/^#EXT-X-MAP:.*URI="([^"]+)"/)
+    if (map) {
+      init ||= map[1]
+      continue
+    }
+    if (row === '#EXT-X-DISCONTINUITY') {
+      broken = true
+      continue
+    }
+    if (row.startsWith('#EXTINF:')) {
+      duration = Number.parseFloat(row.slice(8)) || 0
+      continue
+    }
+    if (row.startsWith('#')) continue
+    if (broken && parts.length) group += 1
+    broken = false
+    parts.push({ url: row, duration, group })
+    duration = 0
   }
-  for (let index = 0; index < rows.length; index += 1) {
-    if (!rows[index].startsWith('#EXTINF:')) continue
-    const uri = (rows[index + 1] || '').trim()
-    if (uri && !uri.startsWith('#')) parts.push(uri)
-  }
-  return parts
+  const sample = parts[parts.length - 1]?.url || ''
+  return { init, parts, ext: init || sample.includes('.mp4') ? 'mp4' : 'ts' }
 }
 
-async function playlist(url: string, signal: AbortSignal): Promise<{ parts: string[]; ext: string }> {
+async function loadPlan(url: string, signal: AbortSignal): Promise<Plan> {
   const response = await pull(url, signal)
-  const upstream = upstreamFromPlay(url) || url
-  const text = rewritePlaylist(stripInjectedAds(await response.text()), upstream)
+  const upstream = upstreamFromPlay(response.url || url) || response.url || url
+  const text = rewritePlaylist(await response.text(), upstream)
   if (!text.includes('#EXTM3U')) throw new Error('这一集暂时收不下来')
   if (text.includes('#EXT-X-STREAM-INF')) {
     const next = variantOf(text)
     if (!next) throw new Error('这一集暂时收不下来')
-    return playlist(next, signal)
+    return loadPlan(next, signal)
   }
-  const parts = mediaParts(text)
-  if (!parts.length) throw new Error('这一集暂时收不下来')
-  const sample = parts[parts.length - 1]
-  const ext = sample.includes('.mp4') ? 'mp4' : 'ts'
-  return { parts, ext }
+  const plan = mediaPlan(text)
+  if (!plan.parts.length) throw new Error('这一集暂时收不下来')
+  return plan
 }
 
 function saveBlob(blob: Blob, filename: string) {
@@ -289,14 +319,18 @@ async function readBody(response: Response, control: DownloadControl, onBytes: (
   return new Blob(chunks)
 }
 
-/** 多路同时拉。暂停只重下当前这一段；某一路失败则停掉其余连接。 */
-async function inLanes(count: number, lanes: number, control: DownloadControl, job: (index: number) => Promise<void>) {
-  const pending = Array.from({ length: count }, (_, index) => index)
+/** 多路同时拉。播放器在播时按缓冲余量少开几路；暂停只重下当前这一段；某一路失败则停掉其余连接。 */
+async function inLanes(jobs: number[], lanes: number, control: DownloadControl, job: (index: number) => Promise<void>) {
+  const pending = jobs.slice()
   let dead: unknown = null
-  const workers = Array.from({ length: Math.min(lanes, count) }, async () => {
-    while (!control.stopped && !dead) {
+  const workers = Array.from({ length: Math.min(lanes, pending.length) }, async (_, lane) => {
+    while (!control.stopped && !dead && pending.length) {
       await control.wait()
       if (control.stopped || dead) return
+      if (lane >= downloadLanes(lanes)) {
+        await sleep(500)
+        continue
+      }
       const index = pending.shift()
       if (index === undefined) return
       if (control.paused) {
@@ -353,6 +387,7 @@ async function probeRange(url: string, signal: AbortSignal): Promise<{ total: nu
       signal,
       credentials: credentialsFor(url),
       headers: { Range: 'bytes=0-0' },
+      priority: 'low',
     })
     try {
       if (response.status === 206) {
@@ -403,6 +438,27 @@ async function takeSlice(url: string, start: number, end: number, control: Downl
   }
 }
 
+async function headOf(blob: Blob): Promise<TsHead> {
+  return probeTs(new Uint8Array(await blob.slice(0, HEAD_BYTES).arrayBuffer()))
+}
+
+/** mux.js 只认 H.264 + AAC，其它编码直接存 ts。 */
+function remuxable(head: TsHead): boolean {
+  if (head.video === null && head.audio === null) return false
+  return (head.videoCodec === '' || head.videoCodec === 'avc') && (head.audioCodec === '' || head.audioCodec === 'aac')
+}
+
+async function packTs(chunks: Blob[]): Promise<Blob | null> {
+  if (!remuxable(await headOf(chunks[0]))) return null
+  const remux = openRemux()
+  try {
+    for (const chunk of chunks) remux.push(chunk)
+    return await remux.finish()
+  } finally {
+    remux.close()
+  }
+}
+
 async function downloadWhole(url: string, filename: string, control: DownloadControl, meter: Meter) {
   const probe = await probeRange(url, control.signal)
   if (control.stopped) return
@@ -411,17 +467,22 @@ async function downloadWhole(url: string, filename: string, control: DownloadCon
     const slices = slicesOf(probe.total)
     const pieces: Blob[] = new Array(slices.length)
     meter.setTotal(probe.total)
-    await inLanes(slices.length, slices.length, control, async (index) => {
-      const slice = slices[index]
-      pieces[index] = await takeSlice(url, slice.start, slice.end, control, meter)
-    })
+    await inLanes(
+      slices.map((_, index) => index),
+      FILE_LANES,
+      control,
+      async (index) => {
+        const slice = slices[index]
+        pieces[index] = await takeSlice(url, slice.start, slice.end, control, meter)
+      },
+    )
     if (control.stopped) return
     if (pieces.some((piece) => !piece)) throw new Error('暂时收不下来')
     blob = new Blob(pieces, { type: url.includes('.mp4') ? 'video/mp4' : 'video/mp2t' })
   } else {
     if (probe.total > 0) meter.setTotal(probe.total)
     let stored: Blob | null = null
-    await inLanes(1, 1, control, async () => {
+    await inLanes([0], 1, control, async () => {
       stored = await take(url, control, meter, (size) => meter.setTotal(size))
     })
     if (control.stopped || !stored) return
@@ -432,53 +493,145 @@ async function downloadWhole(url: string, filename: string, control: DownloadCon
     return
   }
   meter.pack()
-  const packed = await remuxTsBlobs([blob], control)
+  const packed = await packTs([blob])
   if (control.stopped) return
   saveBlob(packed || blob, `${filename}.${packed ? 'mp4' : 'ts'}`)
 }
 
-async function fetchParts(parts: string[], ext: string, filename: string, control: DownloadControl, meter: Meter) {
-  const chunks: Blob[] = new Array(parts.length)
-  const sizes = new Array<number>(parts.length).fill(0)
-  let sized = 0
-  let sizedBytes = 0
+async function fetchMp4Parts(plan: Plan, filename: string, control: DownloadControl, meter: Meter) {
+  const urls = [...(plan.init ? [plan.init] : []), ...plan.parts.map((part) => part.url)]
+  const chunks: Blob[] = new Array(urls.length)
   let finished = 0
-
-  const rememberSize = (index: number, size: number) => {
-    if (size <= 0 || sizes[index] === size) return
-    if (sizes[index] === 0) sized += 1
-    sizedBytes += size - sizes[index]
-    sizes[index] = size
-    if (sized === parts.length) {
-      meter.setTotal(sizedBytes)
-      return
-    }
-    const samples = sizes.filter((item) => item >= 8 * 1024)
-    if (!samples.length) return
-    const average = samples.reduce((sum, item) => sum + item, 0) / samples.length
-    const missing = parts.length - sized
-    meter.setTotal(Math.round(sizedBytes + average * missing))
-  }
-
-  await inLanes(parts.length, PART_LANES, control, async (index) => {
-    chunks[index] = await take(parts[index], control, meter, (size) => rememberSize(index, size))
-    finished += 1
-    meter.setShare(finished / parts.length)
-  })
+  await inLanes(
+    urls.map((_, index) => index),
+    PART_LANES,
+    control,
+    async (index) => {
+      chunks[index] = await take(urls[index], control, meter)
+      finished += 1
+      meter.setShare(finished / urls.length)
+    },
+  )
   if (control.stopped) return
   if (chunks.some((chunk) => !chunk)) throw new Error('暂时收不下来')
-  if (ext === 'mp4') {
-    saveBlob(new Blob(chunks, { type: 'video/mp4' }), `${filename}.mp4`)
-    return
+  saveBlob(new Blob(chunks, { type: 'video/mp4' }), `${filename}.mp4`)
+}
+
+/**
+ * 先拉每组第一个分片，按时间线认出广告组；再只拉正片分片，边下边按顺序交给后台装成 mp4。
+ */
+async function fetchTsParts(plan: Plan, filename: string, control: DownloadControl, meter: Meter) {
+  const { parts } = plan
+  const chunks: Array<Blob | undefined> = new Array(parts.length)
+  const sizes = new Array<number>(parts.length).fill(0)
+  const wanted = new Array<boolean>(parts.length).fill(true)
+  const probes = new Map<number, TsHead>()
+  let order: number[] | null = null
+  let cursor = 0
+  let remux = undefined as RemuxPipe | null | undefined
+  let feeding = Promise.resolve()
+
+  const estimate = () => {
+    let count = 0
+    let done = 0
+    let known = 0
+    let knownBytes = 0
+    let samples = 0
+    let sampleBytes = 0
+    for (let index = 0; index < parts.length; index += 1) {
+      if (!wanted[index]) continue
+      count += 1
+      if (chunks[index]) done += 1
+      if (sizes[index] <= 0) continue
+      known += 1
+      knownBytes += sizes[index]
+      if (sizes[index] >= 8 * 1024) {
+        samples += 1
+        sampleBytes += sizes[index]
+      }
+    }
+    if (known === count) meter.setTotal(knownBytes)
+    else if (samples) meter.setTotal(Math.round(knownBytes + (sampleBytes / samples) * (count - known)))
+    meter.setShare(count ? done / count : 0)
   }
-  meter.pack()
-  const packed = await remuxTsBlobs(chunks, control)
-  if (control.stopped) return
-  if (packed) {
-    saveBlob(packed, `${filename}.mp4`)
-    return
+
+  const feed = () => {
+    feeding = feeding.then(async () => {
+      if (!order) return
+      while (cursor < order.length) {
+        const chunk = chunks[order[cursor]]
+        if (!chunk) return
+        if (remux === undefined) {
+          const head = probes.get(order[cursor]) ?? (await headOf(chunk).catch(() => null))
+          remux = head && remuxable(head) ? openRemux() : null
+        }
+        remux?.push(chunk)
+        cursor += 1
+      }
+    })
   }
-  saveBlob(new Blob(chunks, { type: 'video/mp2t' }), `${filename}.ts`)
+
+  const fetchOne = async (index: number) => {
+    const blob = await take(parts[index].url, control, meter, (size) => {
+      sizes[index] = size
+      estimate()
+    })
+    chunks[index] = blob
+    estimate()
+    feed()
+  }
+
+  try {
+    const heads = parts.flatMap((part, index) => (index === 0 || part.group !== parts[index - 1].group ? [index] : []))
+    if (heads.length > 1) {
+      await inLanes(heads, PART_LANES, control, async (index) => {
+        await fetchOne(index)
+        probes.set(index, await headOf(chunks[index]!))
+      })
+      if (control.stopped) return
+      if (heads.some((index) => !probes.has(index))) throw new Error('暂时收不下来')
+      const groups: GroupHead[] = heads.map((index) => {
+        const head = probes.get(index)!
+        const start = head.video ?? head.audio
+        return { start: start === null ? null : start / CLOCK, duration: 0, parts: 0, sps: head.sps, audio: head.audio !== null }
+      })
+      for (const part of parts) {
+        groups[part.group].duration += part.duration
+        groups[part.group].parts += 1
+      }
+      const ads = findAdGroups(groups)
+      parts.forEach((part, index) => {
+        if (!ads.has(part.group)) return
+        wanted[index] = false
+        const chunk = chunks[index]
+        if (chunk) meter.add(-chunk.size)
+        chunks[index] = undefined
+      })
+    }
+    order = parts.flatMap((_, index) => (wanted[index] ? [index] : []))
+    estimate()
+    feed()
+    await inLanes(
+      order.filter((index) => !chunks[index]),
+      PART_LANES,
+      control,
+      fetchOne,
+    )
+    if (control.stopped) return
+    if (order.some((index) => !chunks[index])) throw new Error('暂时收不下来')
+    feed()
+    await feeding
+    if (remux) meter.pack()
+    const packed = remux ? await remux.finish() : null
+    if (control.stopped) return
+    if (packed) {
+      saveBlob(packed, `${filename}.mp4`)
+      return
+    }
+    saveBlob(new Blob(order.map((index) => chunks[index]!), { type: 'video/mp2t' }), `${filename}.ts`)
+  } finally {
+    remux?.close()
+  }
 }
 
 /** 按当前播放地址下载。地址已由 VITE_USE_PROXY 决定是片源直连还是本站代理。 */
@@ -492,8 +645,9 @@ export async function downloadEpisode(url: string, filename: string, control: Do
         await downloadWhole(url, filename, control, meter)
         return
       }
-      const { parts, ext } = await playlist(url, control.signal)
-      await fetchParts(parts, ext, filename, control, meter)
+      const plan = await loadPlan(url, control.signal)
+      if (plan.ext === 'mp4') await fetchMp4Parts(plan, filename, control, meter)
+      else await fetchTsParts(plan, filename, control, meter)
       return
     } catch (reason) {
       if (control.stopped) return
