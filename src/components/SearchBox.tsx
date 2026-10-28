@@ -2,8 +2,11 @@ import { useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent 
 import { channelName, suggestVideos } from '../lib/api'
 import { href } from '../lib/router'
 import { Cover } from './Cover'
-import { ensureLibrary, searchRemote } from '../lib/source'
+import { searchRemote, warmSearchToken } from '../lib/source'
 import type { VideoItem } from '../lib/types'
+
+/** 停止输入这么久再去片库联想；拼音还没选字时不搜。 */
+const SUGGEST_DELAY_MS = 250
 
 type Props = {
   value: string
@@ -19,10 +22,7 @@ export function SearchBox({ value, onChange, onSubmit }: Props) {
   const [items, setItems] = useState<VideoItem[]>([])
   const [active, setActive] = useState(0)
   const [pending, setPending] = useState(false)
-
-  useEffect(() => {
-    void ensureLibrary().catch(() => undefined)
-  }, [])
+  const [composing, setComposing] = useState(false)
 
   useEffect(() => {
     const q = value.trim()
@@ -31,6 +31,7 @@ export function SearchBox({ value, onChange, onSubmit }: Props) {
       setPending(false)
       return
     }
+    if (composing) return
     let live = true
     setItems(suggestVideos(q))
     setActive(0)
@@ -53,12 +54,12 @@ export function SearchBox({ value, onChange, onSubmit }: Props) {
         .finally(() => {
           if (live) setPending(false)
         })
-    }, 140)
+    }, SUGGEST_DELAY_MS)
     return () => {
       live = false
       window.clearTimeout(timer)
     }
-  }, [value, open])
+  }, [value, open, composing])
 
   const submit = (event: FormEvent) => {
     event.preventDefault()
@@ -89,9 +90,12 @@ export function SearchBox({ value, onChange, onSubmit }: Props) {
             onChange(event.target.value)
             setOpen(true)
           }}
+          onCompositionStart={() => setComposing(true)}
+          onCompositionEnd={() => setComposing(false)}
           onFocus={() => {
             window.clearTimeout(closeTimer.current)
             setOpen(true)
+            warmSearchToken()
           }}
           onBlur={() => {
             closeTimer.current = window.setTimeout(() => setOpen(false), 180)

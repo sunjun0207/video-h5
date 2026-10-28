@@ -416,6 +416,7 @@ button { cursor: pointer; }
   border: 0; border-radius: 999px; padding: 8px 14px; background: var(--teal); color: #fff; font: inherit; cursor: pointer;
 }
 .download-btn:disabled { opacity: 0.5; cursor: default; }
+.download-btn.ghost { padding: 7px 13px; border: 1px solid var(--teal); background: transparent; color: var(--teal); }
 .play-copy h1 { margin: 8px 0 4px; font-size: 1.45rem; }
 .play-copy p { margin: 4px 0; color: var(--muted); line-height: 1.6; }
 .play-copy .detail-summary { color: #234046; }

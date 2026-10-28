@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { href } from '../lib/router'
-import { searchRemote } from '../lib/source'
+import { peekSearch, searchRemote } from '../lib/source'
 import { clearSearchHistory, clearSearchSpot, getSearchHistory, markSearchSpot, readSearchSpot, removeSearchHistory } from '../lib/storage'
 import type { VideoItem } from '../lib/types'
 import { PosterCard } from '../components/PosterCard'
@@ -17,11 +17,11 @@ type Props = {
 export function SearchPage({ keyword, libraryVersion, onLibraryChange, onSearch }: Props) {
   const q = keyword.trim()
   const [draft, setDraft] = useState(q)
-  const [list, setList] = useState<VideoItem[]>([])
-  const [pending, setPending] = useState(Boolean(q))
+  const [list, setList] = useState<VideoItem[]>(() => peekSearch(q) ?? [])
+  const [pending, setPending] = useState(() => Boolean(q) && !peekSearch(q))
   const [error, setError] = useState('')
   const [spotId, setSpotId] = useState('')
-  const [loadedFor, setLoadedFor] = useState('')
+  const [loadedFor, setLoadedFor] = useState(() => (peekSearch(q) ? q : ''))
   const history = getSearchHistory()
   void libraryVersion
 
@@ -33,6 +33,14 @@ export function SearchPage({ keyword, libraryVersion, onLibraryChange, onSearch 
     if (!q) {
       setList([])
       setLoadedFor('')
+      setError('')
+      setPending(false)
+      return
+    }
+    const cached = peekSearch(q)
+    if (cached) {
+      setList(cached)
+      setLoadedFor(q)
       setError('')
       setPending(false)
       return

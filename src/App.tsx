@@ -11,7 +11,10 @@ import { LibraryPage } from './pages/LibraryPage'
 import { SearchPage } from './pages/SearchPage'
 import { Pending } from './components/Pending'
 
-const PlayPage = lazy(() => import('./pages/PlayPage').then((mod) => ({ default: mod.PlayPage })))
+const loadPlayPage = () => import('./pages/PlayPage')
+const PlayPage = lazy(() => loadPlayPage().then((mod) => ({ default: mod.PlayPage })))
+/** 播放页连同播放器较大：详情页一打开就先下载，其它页面空闲一会儿再下载。 */
+const PLAY_CHUNK_IDLE_MS = 4000
 
 function readRoute(): Route {
   return parseHash(window.location.hash)
@@ -31,6 +34,14 @@ export default function App() {
     if (!window.location.hash) window.location.hash = '#/'
     return () => window.removeEventListener('hashchange', sync)
   }, [])
+
+  useEffect(() => {
+    if (route.name === 'play') return
+    const timer = window.setTimeout(() => {
+      void loadPlayPage().catch(() => undefined)
+    }, route.name === 'detail' ? 0 : PLAY_CHUNK_IDLE_MS)
+    return () => window.clearTimeout(timer)
+  }, [route.name])
 
   useEffect(() => {
     const base = import.meta.env.VITE_APP_TITLE || '观影jun.sun'

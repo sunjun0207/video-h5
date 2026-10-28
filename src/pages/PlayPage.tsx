@@ -1,10 +1,17 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { channelName, getVideo, relatedVideos } from '../lib/api'
 import { href } from '../lib/router'
-import { createDownloadControl, downloadEpisode, downloadName, qualityOf, type DownloadControl, type DownloadProgress } from '../lib/download'
-import { ensurePlayUrl } from '../lib/source'
+import {
+  createDownloadControl,
+  downloadEpisode,
+  downloadName,
+  qualityOf,
+  revealDownload,
+  type DownloadControl,
+  type DownloadProgress,
+} from '../lib/download'
+import { ensurePlayUrl, useVideos } from '../lib/source'
 import { historyOf, rememberPlay } from '../lib/storage'
-import type { VideoItem } from '../lib/types'
 import { Player } from '../components/Player'
 import { PosterCard } from '../components/PosterCard'
 import { Pending } from '../components/Pending'
@@ -34,6 +41,14 @@ function formatPercent(ratio: number): string {
   return '0'
 }
 
+function folderHint(file: string): string {
+  const agent = navigator.userAgent
+  const mobile = /Android|iPhone|iPad|iPod/i.test(agent) || (navigator.maxTouchPoints > 1 && /Macintosh/i.test(agent))
+  if (mobile) return `「${file}」在浏览器的「下载」里，iPhone / iPad 在「文件」App 的「下载」文件夹。`
+  const keys = /Macintosh/i.test(agent) ? '⌥⌘L' : 'Ctrl+J'
+  return `「${file}」在浏览器的下载文件夹里：按 ${keys} 打开下载列表，点「在文件夹中显示」。`
+}
+
 function downloadText(phase: 'idle' | 'running' | 'paused', stat: DownloadProgress): string {
   const percent = formatPercent(stat.ratio)
   const size = stat.total > 0 ? `${formatSize(stat.received)} / ${formatSize(stat.total)}` : formatSize(stat.received)
@@ -51,13 +66,15 @@ type Props = {
 }
 
 export function PlayPage({ id, ep, onLibraryChange }: Props) {
-  const [item, setItem] = useState<VideoItem | undefined>(() => getVideo(id))
+  useVideos()
+  const item = getVideo(id)
   const [stream, setStream] = useState({ key: '', url: '', line: '' })
   const [error, setError] = useState('')
   const [pick, setPick] = useState<{ id: string; ep: number; path: string } | null>(null)
   const [saveStat, setSaveStat] = useState<DownloadProgress>(emptyStat)
   const [savePhase, setSavePhase] = useState<'idle' | 'running' | 'paused'>('idle')
   const [saveNote, setSaveNote] = useState('')
+  const [savedFile, setSavedFile] = useState('')
   const savedAt = useRef(0)
   const warmed = useRef('')
   const saveControl = useRef<DownloadControl | null>(null)
@@ -71,17 +88,17 @@ export function PlayPage({ id, ep, onLibraryChange }: Props) {
     const history = historyOf(id)
     return history && history.ep === index ? history.time : 0
   }, [id, index, streamKey])
-  const playUrl = error ? '' : stream.key === streamKey ? stream.url : episode?.url || ''
-  const lineName = stream.key === streamKey ? stream.line : episode?.line || ''
+  /** 换线路时先不放旧线路的地址，免得新线路还没选好时旧线路又拉起来抢带宽。 */
+  const known = forced ? undefined : episode
+  const playUrl = error ? '' : stream.key === streamKey ? stream.url : known?.url || ''
+  const lineName = stream.key === streamKey ? stream.line : known?.line || ''
 
   useEffect(() => {
     let live = true
     setError('')
     ensurePlayUrl(id, index, forced)
       .then((result) => {
-        if (!live) return
-        setItem(getVideo(id))
-        setStream({ key: streamKey, url: result.url, line: result.line })
+        if (live) setStream({ key: streamKey, url: result.url, line: result.line })
       })
       .catch((reason: unknown) => {
         if (live) setError(reason instanceof Error ? reason.message : '这一段还没到来')
@@ -91,16 +108,18 @@ export function PlayPage({ id, ep, onLibraryChange }: Props) {
     }
   }, [id, index, forced, streamKey])
 
+  const itemId = item?.id
   useEffect(() => {
-    if (!item) return
-    rememberPlay(item.id, index, resumeAt)
+    if (!itemId) return
+    rememberPlay(itemId, index, resumeAt)
     onLibraryChange()
-  }, [item, index, onLibraryChange, resumeAt])
+  }, [itemId, index, onLibraryChange, resumeAt])
 
   useEffect(() => {
     setSavePhase('idle')
     setSaveStat(emptyStat)
     setSaveNote('')
+    setSavedFile('')
     return () => {
       saveTicket.current += 1
       saveControl.current?.cancel()
@@ -125,6 +144,7 @@ export function PlayPage({ id, ep, onLibraryChange }: Props) {
     saveTicket.current = ticket
     saveControl.current = control
     setSaveNote('')
+    setSavedFile('')
     setSaveStat(emptyStat)
     setSavePhase('running')
     const episodeName = item.episodes.length > 1 ? episode.title : ''
@@ -132,12 +152,13 @@ export function PlayPage({ id, ep, onLibraryChange }: Props) {
       if (saveTicket.current !== ticket || control.stopped) return
       setSaveStat(stat)
     })
-      .then(() => {
+      .then((file) => {
         if (saveTicket.current !== ticket || control.stopped) return
         saveControl.current = null
         setSavePhase('idle')
         setSaveStat(emptyStat)
         setSaveNote('已经留下')
+        setSavedFile(file)
       })
       .catch((reason: unknown) => {
         if (saveTicket.current !== ticket || control.stopped) return
@@ -146,6 +167,13 @@ export function PlayPage({ id, ep, onLibraryChange }: Props) {
         setSaveStat(emptyStat)
         setSaveNote(reason instanceof Error ? reason.message : '暂时收不下来')
       })
+  }
+
+  const openFolder = () => {
+    const file = savedFile
+    void revealDownload().then((shown) => {
+      if (!shown) setSaveNote(folderHint(file))
+    })
   }
 
   if (!item || !episode) {
@@ -213,6 +241,11 @@ export function PlayPage({ id, ep, onLibraryChange }: Props) {
               <button type="button" className="download-btn" disabled={savePhase === 'idle' && !playUrl} onClick={saveEpisode}>
                 {savePhase === 'running' ? '暂停' : savePhase === 'paused' ? '继续下载' : '下载'}
               </button>
+              {savePhase === 'idle' && savedFile ? (
+                <button type="button" className="download-btn ghost" title={savedFile} onClick={openFolder}>
+                  打开文件所在位置
+                </button>
+              ) : null}
               {savePhase === 'idle' && saveNote ? <span>{saveNote}</span> : null}
             </div>
             <p className="detail-summary">{item.summary}</p>

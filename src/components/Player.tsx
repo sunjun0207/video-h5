@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import Hls from 'hls.js'
-import { absolutePlayUrl, rewritePlaylist, upstreamFromPlay, useProxy } from '../lib/mediaProxy'
+import { absolutePlayUrl, rewritePlaylist, takePlaylist, upstreamFromPlay, useProxy } from '../lib/mediaProxy'
 import { reportPlayback } from '../lib/playback'
 import type { Episode } from '../lib/types'
 
@@ -96,7 +96,7 @@ export function Player({ episode, resumeAt, loadError = '', onTime, onEnded }: P
       if (!live || started || starting || endedRef.current) return
       const ahead = bufferedAhead()
       const waited = Date.now() - attachedAt
-      if (ahead < 6 && waited < 10000) return
+      if (ahead < 4 && waited < 10000) return
       if (video.readyState < 3 && ahead < 2 && waited < 15000) return
       starting = true
       void video.play().then(() => {
@@ -125,19 +125,39 @@ export function Player({ episode, resumeAt, loadError = '', onTime, onEnded }: P
       }
       const BaseLoader = Hls.DefaultConfig.loader
       class ProxyLoader extends BaseLoader {
+        private seedTimer = 0
         load(context: any, config: any, callbacks: any) {
           const original = String(context.url)
           const upstream = upstreamFromPlay(original) || original
           if (useProxy) context.url = absolutePlayUrl(upstream)
           const onSuccess = callbacks.onSuccess
-          callbacks.onSuccess = (response: { data: unknown }, stats: unknown, ctx: { url: string }, networkDetails?: XMLHttpRequest) => {
+          callbacks.onSuccess = (response: { data: unknown }, stats: unknown, ctx: { url: string }, networkDetails?: XMLHttpRequest | null) => {
             const finalUpstream = upstreamFromPlay(networkDetails?.responseURL || ctx.url) || upstream
             if (typeof response.data === 'string' && response.data.includes('#EXTM3U')) {
               response.data = rewritePlaylist(response.data, finalUpstream)
             }
             onSuccess(response, stats, ctx, networkDetails)
           }
-          super.load(context, config, callbacks)
+          const seeded = context.type === 'manifest' || context.type === 'level' ? takePlaylist(upstream) : null
+          if (!seeded) {
+            super.load(context, config, callbacks)
+            return
+          }
+          const stats = this.stats
+          stats.loading.start = stats.loading.first = stats.loading.end = self.performance.now()
+          stats.loaded = stats.total = seeded.length
+          this.context = context
+          this.seedTimer = window.setTimeout(() => {
+            callbacks.onSuccess({ url: context.url, data: seeded, code: 200 }, stats, context, null)
+          }, 0)
+        }
+        abort() {
+          window.clearTimeout(this.seedTimer)
+          super.abort()
+        }
+        destroy() {
+          window.clearTimeout(this.seedTimer)
+          super.destroy()
         }
       }
       const startAt = resumeAt > 1 ? resumeAt : -1

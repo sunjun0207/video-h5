@@ -115,13 +115,39 @@ async function loadPlan(url: string, signal: AbortSignal): Promise<Plan> {
   return plan
 }
 
-function saveBlob(blob: Blob, filename: string) {
+function saveBlob(blob: Blob, filename: string): string {
   const href = URL.createObjectURL(blob)
   const link = document.createElement('a')
   link.href = href
   link.download = filename
   link.click()
   window.setTimeout(() => URL.revokeObjectURL(href), 30_000)
+  return filename
+}
+
+type FilePickerWindow = Window & {
+  showOpenFilePicker?: (options: {
+    startIn?: string
+    types?: { description: string; accept: Record<string, string[]> }[]
+  }) => Promise<unknown>
+}
+
+/**
+ * 网页没法直接打开系统文件夹。桌面 Chrome / Edge 能弹出从「下载」文件夹开始的文件框，刚存的文件就在里面；
+ * 其它浏览器返回 false，由页面提示去浏览器的下载列表里找。
+ */
+export async function revealDownload(): Promise<boolean> {
+  const picker = (window as FilePickerWindow).showOpenFilePicker
+  if (!picker) return false
+  try {
+    await picker.call(window, {
+      startIn: 'downloads',
+      types: [{ description: '视频', accept: { 'video/mp4': ['.mp4'], 'video/mp2t': ['.ts'] } }],
+    })
+    return true
+  } catch (reason) {
+    return reason instanceof DOMException && reason.name === 'AbortError'
+  }
 }
 
 const QUALITY = /4K|超清|蓝光|1080|原画|高清|标清|720|极速|流畅|播放快/
@@ -459,9 +485,9 @@ async function packTs(chunks: Blob[]): Promise<Blob | null> {
   }
 }
 
-async function downloadWhole(url: string, filename: string, control: DownloadControl, meter: Meter) {
+async function downloadWhole(url: string, filename: string, control: DownloadControl, meter: Meter): Promise<string> {
   const probe = await probeRange(url, control.signal)
-  if (control.stopped) return
+  if (control.stopped) return ''
   let blob: Blob
   if (probe.ranged && probe.total >= MIN_SLICE * 2) {
     const slices = slicesOf(probe.total)
@@ -476,7 +502,7 @@ async function downloadWhole(url: string, filename: string, control: DownloadCon
         pieces[index] = await takeSlice(url, slice.start, slice.end, control, meter)
       },
     )
-    if (control.stopped) return
+    if (control.stopped) return ''
     if (pieces.some((piece) => !piece)) throw new Error('暂时收不下来')
     blob = new Blob(pieces, { type: url.includes('.mp4') ? 'video/mp4' : 'video/mp2t' })
   } else {
@@ -485,20 +511,17 @@ async function downloadWhole(url: string, filename: string, control: DownloadCon
     await inLanes([0], 1, control, async () => {
       stored = await take(url, control, meter, (size) => meter.setTotal(size))
     })
-    if (control.stopped || !stored) return
+    if (control.stopped || !stored) return ''
     blob = stored
   }
-  if (url.includes('.mp4')) {
-    saveBlob(blob, `${filename}.mp4`)
-    return
-  }
+  if (url.includes('.mp4')) return saveBlob(blob, `${filename}.mp4`)
   meter.pack()
   const packed = await packTs([blob])
-  if (control.stopped) return
-  saveBlob(packed || blob, `${filename}.${packed ? 'mp4' : 'ts'}`)
+  if (control.stopped) return ''
+  return saveBlob(packed || blob, `${filename}.${packed ? 'mp4' : 'ts'}`)
 }
 
-async function fetchMp4Parts(plan: Plan, filename: string, control: DownloadControl, meter: Meter) {
+async function fetchMp4Parts(plan: Plan, filename: string, control: DownloadControl, meter: Meter): Promise<string> {
   const urls = [...(plan.init ? [plan.init] : []), ...plan.parts.map((part) => part.url)]
   const chunks: Blob[] = new Array(urls.length)
   let finished = 0
@@ -512,15 +535,15 @@ async function fetchMp4Parts(plan: Plan, filename: string, control: DownloadCont
       meter.setShare(finished / urls.length)
     },
   )
-  if (control.stopped) return
+  if (control.stopped) return ''
   if (chunks.some((chunk) => !chunk)) throw new Error('暂时收不下来')
-  saveBlob(new Blob(chunks, { type: 'video/mp4' }), `${filename}.mp4`)
+  return saveBlob(new Blob(chunks, { type: 'video/mp4' }), `${filename}.mp4`)
 }
 
 /**
  * 先拉每组第一个分片，按时间线认出广告组；再只拉正片分片，边下边按顺序交给后台装成 mp4。
  */
-async function fetchTsParts(plan: Plan, filename: string, control: DownloadControl, meter: Meter) {
+async function fetchTsParts(plan: Plan, filename: string, control: DownloadControl, meter: Meter): Promise<string> {
   const { parts } = plan
   const chunks: Array<Blob | undefined> = new Array(parts.length)
   const sizes = new Array<number>(parts.length).fill(0)
@@ -588,7 +611,7 @@ async function fetchTsParts(plan: Plan, filename: string, control: DownloadContr
         await fetchOne(index)
         probes.set(index, await headOf(chunks[index]!))
       })
-      if (control.stopped) return
+      if (control.stopped) return ''
       if (heads.some((index) => !probes.has(index))) throw new Error('暂时收不下来')
       const groups: GroupHead[] = heads.map((index) => {
         const head = probes.get(index)!
@@ -617,40 +640,33 @@ async function fetchTsParts(plan: Plan, filename: string, control: DownloadContr
       control,
       fetchOne,
     )
-    if (control.stopped) return
+    if (control.stopped) return ''
     if (order.some((index) => !chunks[index])) throw new Error('暂时收不下来')
     feed()
     await feeding
     if (remux) meter.pack()
     const packed = remux ? await remux.finish() : null
-    if (control.stopped) return
-    if (packed) {
-      saveBlob(packed, `${filename}.mp4`)
-      return
-    }
-    saveBlob(new Blob(order.map((index) => chunks[index]!), { type: 'video/mp2t' }), `${filename}.ts`)
+    if (control.stopped) return ''
+    if (packed) return saveBlob(packed, `${filename}.mp4`)
+    return saveBlob(new Blob(order.map((index) => chunks[index]!), { type: 'video/mp2t' }), `${filename}.ts`)
   } finally {
     remux?.close()
   }
 }
 
-/** 按当前播放地址下载。地址已由 VITE_USE_PROXY 决定是片源直连还是本站代理。 */
-export async function downloadEpisode(url: string, filename: string, control: DownloadControl, onProgress: Progress): Promise<void> {
+/** 按当前播放地址下载，返回存下的文件名（被取消时为空）。地址已由 VITE_USE_PROXY 决定是片源直连还是本站代理。 */
+export async function downloadEpisode(url: string, filename: string, control: DownloadControl, onProgress: Progress): Promise<string> {
   const meter = createMeter(onProgress)
   while (!control.stopped) {
     await control.wait()
-    if (control.stopped) return
+    if (control.stopped) return ''
     try {
-      if (!url.includes('.m3u8')) {
-        await downloadWhole(url, filename, control, meter)
-        return
-      }
+      if (!url.includes('.m3u8')) return await downloadWhole(url, filename, control, meter)
       const plan = await loadPlan(url, control.signal)
-      if (plan.ext === 'mp4') await fetchMp4Parts(plan, filename, control, meter)
-      else await fetchTsParts(plan, filename, control, meter)
-      return
+      if (plan.ext === 'mp4') return await fetchMp4Parts(plan, filename, control, meter)
+      return await fetchTsParts(plan, filename, control, meter)
     } catch (reason) {
-      if (control.stopped) return
+      if (control.stopped) return ''
       if (control.paused || isAbort(reason)) {
         meter.reset()
         continue
@@ -658,4 +674,5 @@ export async function downloadEpisode(url: string, filename: string, control: Do
       throw reason
     }
   }
+  return ''
 }

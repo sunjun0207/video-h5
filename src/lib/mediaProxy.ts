@@ -12,6 +12,9 @@ const IMG_B_TARGET = (import.meta.env.VITE_IMG_B_TARGET || 'https://103.39.111.1
 
 export const VOD_COOKIE_PATH = `${API_PREFIX}/vod`
 
+/** 封面直连时的主图源，页面一打开就可以先建连接。走代理时为空。 */
+export const DIRECT_IMAGE_ORIGIN = useProxy ? '' : IMG_TARGET
+
 const PAGE_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 
@@ -104,6 +107,23 @@ export function upstreamFromPlay(value: string): string | null {
   const rest = matched[4]
   const omit = (scheme === 'https' && port === '443') || (scheme === 'http' && port === '80')
   return `${scheme}://${host}${omit ? '' : `:${port}`}${rest}`
+}
+
+const SEED_MS = 2 * 60 * 1000
+const seeded = new Map<string, { text: string; at: number }>()
+
+/** 选线时已经拉过的播放列表先留着，播放器第一次要时直接给，省一次往返。 */
+export function seedPlaylist(upstream: string, text: string) {
+  const now = Date.now()
+  for (const [key, entry] of seeded) if (now - entry.at > SEED_MS) seeded.delete(key)
+  seeded.set(upstream, { text, at: now })
+}
+
+export function takePlaylist(upstream: string): string | null {
+  const entry = seeded.get(upstream)
+  if (!entry) return null
+  seeded.delete(upstream)
+  return Date.now() - entry.at > SEED_MS ? null : entry.text
 }
 
 export function rewritePlaylist(text: string, upstreamUrl: string): string {

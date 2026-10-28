@@ -34,6 +34,10 @@ export type VideoItem = {
   featured?: boolean
   cover?: string
   episodes: Episode[]
+  /** 详情页（选集、线路）拉到的时间。 */
+  loadedAt?: number
+  /** 最近一次出现在首页、栏目、搜索或详情里的时间，本地只留最近的一批。 */
+  seenAt?: number
 }
 
 export type HistoryItem = {

@@ -1,12 +1,14 @@
 import { useEffect, useState } from 'react'
 import { channelName, getVideo, relatedVideos } from '../lib/api'
 import { href } from '../lib/router'
-import { ensureDetail } from '../lib/source'
+import { ensureDetail, ensurePlayUrl, useVideos } from '../lib/source'
 import { isFavorite, toggleFavorite } from '../lib/storage'
-import type { VideoItem } from '../lib/types'
 import { Cover } from '../components/Cover'
 import { PosterCard } from '../components/PosterCard'
 import { Pending } from '../components/Pending'
+
+/** 在详情页停留这么久，就先替第一集挑好线路。 */
+const PLAY_WARM_MS = 600
 
 type Props = {
   id: string
@@ -15,24 +17,30 @@ type Props = {
 }
 
 export function DetailPage({ id, libraryVersion, onLibraryChange }: Props) {
-  const [item, setItem] = useState<VideoItem | undefined>(() => getVideo(id))
+  useVideos()
+  const item = getVideo(id)
   const [error, setError] = useState('')
+  const hasEpisodes = Boolean(item?.episodes.length)
 
   useEffect(() => {
     let live = true
     setError('')
-    setItem(getVideo(id))
-    ensureDetail(id)
-      .then((video) => {
-        if (live) setItem(video)
-      })
-      .catch((reason: unknown) => {
-        if (live) setError(reason instanceof Error ? reason.message : '没有找到这部片子')
-      })
+    ensureDetail(id).catch((reason: unknown) => {
+      if (live) setError(reason instanceof Error ? reason.message : '没有找到这部片子')
+    })
     return () => {
       live = false
     }
   }, [id])
+
+  useEffect(() => {
+    if (!hasEpisodes) return
+    if ((navigator as Navigator & { connection?: { saveData?: boolean } }).connection?.saveData) return
+    const timer = window.setTimeout(() => {
+      void ensurePlayUrl(id, 0).catch(() => undefined)
+    }, PLAY_WARM_MS)
+    return () => window.clearTimeout(timer)
+  }, [id, hasEpisodes])
 
   if (error) return <div className="wrap empty">{error}</div>
   if (!item) {

@@ -1,6 +1,6 @@
 import type { ChannelId, PlayLine, VideoItem } from './types'
 import { stripInjectedAds } from './hlsAds'
-import { absolutePlayUrl, coverUrl, playProxy, upstreamFromPlay, useProxy, VOD_COOKIE_PATH, vodUrl } from './mediaProxy'
+import { absolutePlayUrl, coverUrl, playProxy, seedPlaylist, upstreamFromPlay, useProxy, VOD_COOKIE_PATH, vodUrl } from './mediaProxy'
 import { sha1 } from './sha1'
 
 const CHANNELS: { id: ChannelId; name: string; path: string }[] = [
@@ -20,11 +20,52 @@ const TYPE_CHANNEL: Record<string, ChannelId> = {
 }
 const PLAY_PATH = /^\/play\/\d+-\d+-\d+\.html$/
 
-let cookieAt = 0
-let searchToken = ''
-let homeCache: { videos: VideoItem[] } | null = null
-let homeAt = 0
+const TOKEN_KEY = 'video_h5_search_token'
+/** 搜索口令实测 10 分钟后仍然有效；超过 8 分钟就先换一个新的。 */
+const TOKEN_FRESH_MS = 8 * 60 * 1000
+/** 校验 Cookie 在对方那边能用多久不确定，浏览器这边先留 7 天，失效了会再算一次。 */
+const COOKIE_AGE = 7 * 24 * 3600
+/** 一条线路这么久还没测完，不停它，再加测下一条。有的片源播放列表要二十多秒才回来，但能播。 */
+const SLOW_LINE_MS = 8000
+/** 测速：整段最多等这么久（含首字节）。 */
+const SAMPLE_MS = 4500
+/** 测速：读够这么久或这么多就停。 */
+const SAMPLE_READ_MS = 1500
+const SAMPLE_BYTES = 1200 * 1024
+const GOOD_RATIO = 1.3
+const STEADY_RATIO = 1.05
+/** 第一条能播的线路测完后，再等这么久，看有没有更合适的。 */
+const PICK_GRACE_MS = 1500
+/** 同时测速的线路数，太多会互相抢带宽、测不准。 */
+const RACE_LANES = 3
+
+let solvedAt = 0
+let searchToken = readToken()
+let tokenWarming: Promise<unknown> | null = null
 const playCache = new Map<string, { at: number; value: { url: string; line: string } }>()
+const playLoads = new Map<string, Promise<{ url: string; line: string }>>()
+
+function readToken(): { value: string; at: number } {
+  try {
+    const data = JSON.parse(localStorage.getItem(TOKEN_KEY) || 'null') as { value?: unknown; at?: unknown } | null
+    if (data && typeof data.value === 'string') return { value: data.value, at: Number(data.at) || 0 }
+  } catch {
+    // 读不出来就当没有
+  }
+  return { value: '', at: 0 }
+}
+
+/** issuedAt 取响应头 Date：浏览器缓存里的旧页面带的是旧口令，不能盖掉新的。 */
+function noteToken(html: string, issuedAt: number) {
+  const value = html.match(/name="t" value="([^"]+)"/)?.[1]
+  if (!value || issuedAt <= searchToken.at) return
+  searchToken = { value, at: issuedAt }
+  try {
+    localStorage.setItem(TOKEN_KEY, JSON.stringify(searchToken))
+  } catch {
+    // 隐私模式下可能存不进去，本次照常用内存里的
+  }
+}
 
 function decode(text: string): string {
   return text
@@ -79,49 +120,38 @@ function solveChallenge(html: string): string {
   return ''
 }
 
-async function openPage(path: string): Promise<Response> {
+async function openPage(path: string, signal?: AbortSignal): Promise<Response> {
   try {
-    return await fetch(vodUrl(path), { credentials: 'same-origin' })
+    return await fetch(vodUrl(path), { credentials: 'same-origin', signal })
   } catch (reason) {
     if (reason instanceof TypeError) throw new Error('片库暂时没有打开')
     throw reason
   }
 }
 
-async function ensureCookie(): Promise<void> {
-  if (cookieAt && Date.now() - cookieAt < 8 * 60 * 1000) return
-  const response = await openPage('/')
-  const html = await response.text()
-  if (response.status === 200 && html.includes('/detail/')) {
-    cookieAt = Date.now()
-    const token = html.match(/name="t" value="([^"]+)"/)?.[1]
-    if (token) searchToken = token
-    return
-  }
+/** 片库要求先算一道题时，用它给的题目算出 Cookie。同时撞上的请求，只要有一个算过就直接重试。 */
+function passChallenge(html: string, sentAt: number) {
+  if (solvedAt >= sentAt) return
   const solved = solveChallenge(html)
   if (!solved) throw new Error('片库暂时没有打开')
-  document.cookie = `cdndefend_js_cookie=${solved}; path=${VOD_COOKIE_PATH}`
-  cookieAt = Date.now()
+  document.cookie = `cdndefend_js_cookie=${solved}; path=${VOD_COOKIE_PATH}; max-age=${COOKIE_AGE}`
+  solvedAt = Date.now()
 }
 
-async function fetchHtml(path: string): Promise<string> {
-  await ensureCookie()
-  const read = async () => {
-    const response = await openPage(path)
+async function fetchHtml(path: string, signal?: AbortSignal): Promise<string> {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const sentAt = Date.now()
+    const response = await openPage(path, signal)
     const html = await response.text()
-    return { response, html }
+    if (response.status === 850 || html.includes('cdndefend_js_cookie')) {
+      passChallenge(html, sentAt)
+      continue
+    }
+    if (response.status !== 200) throw new Error('片库暂时没有打开')
+    noteToken(html, Date.parse(response.headers.get('date') || '') || Date.now())
+    return html
   }
-  let { response, html } = await read()
-  if (response.status === 850 || html.includes("cdndefend_js_cookie")) {
-    cookieAt = 0
-    document.cookie = `cdndefend_js_cookie=; Max-Age=0; path=${VOD_COOKIE_PATH}`
-    await ensureCookie()
-    ;({ response, html } = await read())
-  }
-  if (response.status !== 200) throw new Error('片库暂时没有打开')
-  const token = html.match(/name="t" value="([^"]+)"/)?.[1]
-  if (token) searchToken = token
-  return html
+  throw new Error('片库暂时没有打开')
 }
 
 function visibleTitle(block: string): string {
@@ -322,24 +352,6 @@ function parseSearch(html: string): VideoItem[] {
   return items
 }
 
-function merge(base: VideoItem[], extra: VideoItem[]): VideoItem[] {
-  const map = new Map(base.map((item) => [item.id, item]))
-  for (const item of extra) {
-    const prev = map.get(item.id)
-    if (!prev) {
-      map.set(item.id, item)
-      continue
-    }
-    if (!prev.cover && item.cover) prev.cover = item.cover
-    if (!prev.summary && item.summary) prev.summary = item.summary
-    if (!prev.score && item.score) prev.score = item.score
-    if (item.featured) prev.featured = true
-    if (item.hot > prev.hot) prev.hot = item.hot
-    if (item.channel && prev.channel === 'movie' && item.channel !== 'movie') prev.channel = item.channel
-  }
-  return [...map.values()]
-}
-
 function parsePlay(html: string): string {
   const src = html.match(/src:\s*"([^"]+\.m3u8[^"]*)"/)?.[1]
   if (!src) throw new Error('这一集没有播放地址')
@@ -364,8 +376,24 @@ function chooseVariant(text: string, playlistUrl: string): string {
   return pool.sort((a, b) => Math.abs(a.bandwidth - target) - Math.abs(b.bandwidth - target))[0].url
 }
 
-async function readPlaylist(upstream: string): Promise<{ text: string; url: string }> {
-  const response = await fetch(playProxy(upstream), { credentials: useProxy ? 'same-origin' : 'omit' })
+/** 外部取消或超时，任一发生就中止。 */
+function withDeadline(signal: AbortSignal, ms: number): { signal: AbortSignal; clear: () => void } {
+  const controller = new AbortController()
+  const stop = () => controller.abort()
+  const timer = window.setTimeout(stop, ms)
+  if (signal.aborted) stop()
+  else signal.addEventListener('abort', stop, { once: true })
+  return {
+    signal: controller.signal,
+    clear: () => {
+      window.clearTimeout(timer)
+      signal.removeEventListener('abort', stop)
+    },
+  }
+}
+
+async function readPlaylist(upstream: string, signal: AbortSignal): Promise<{ text: string; url: string }> {
+  const response = await fetch(playProxy(upstream), { credentials: useProxy ? 'same-origin' : 'omit', signal })
   const text = stripInjectedAds(await response.text())
   if (!response.ok || !text.includes('#EXTM3U')) throw new Error('播放列表无效')
   return { text, url: upstreamFromPlay(response.url) || upstream }
@@ -378,23 +406,30 @@ function looksLikeMedia(buf: Uint8Array): boolean {
   return head.includes('ftyp')
 }
 
-async function readLimited(
-  url: string,
-  ms: number,
-  maxBytes = 1600 * 1024,
-  minMs = 2200,
-): Promise<{ bytes: Uint8Array; aborted: boolean; capped: boolean; size: number; headerSize: number }> {
-  const controller = new AbortController()
-  const timer = window.setTimeout(() => controller.abort(), ms)
+type Sample = {
+  bytes: Uint8Array
+  aborted: boolean
+  capped: boolean
+  size: number
+  headerSize: number
+  /** 发出请求到收到响应头。 */
+  waitMs: number
+  /** 收到响应头之后读数据用的时间。 */
+  readMs: number
+}
+
+async function readLimited(url: string, signal: AbortSignal): Promise<Sample> {
+  const limit = withDeadline(signal, SAMPLE_MS)
+  const sent = Date.now()
   let response: Response
   try {
-    response = await fetch(url, { signal: controller.signal, credentials: useProxy ? 'same-origin' : 'omit' })
+    response = await fetch(url, { signal: limit.signal, credentials: useProxy ? 'same-origin' : 'omit' })
   } catch {
-    window.clearTimeout(timer)
-    return { bytes: new Uint8Array(), aborted: true, capped: false, size: 0, headerSize: 0 }
+    limit.clear()
+    return { bytes: new Uint8Array(), aborted: true, capped: false, size: 0, headerSize: 0, waitMs: Date.now() - sent, readMs: 0 }
   }
   if (!response.ok || !response.body) {
-    window.clearTimeout(timer)
+    limit.clear()
     throw new Error('片段没有回应')
   }
   const reader = response.body.getReader()
@@ -409,7 +444,7 @@ async function readLimited(
       if (step.done) break
       chunks.push(step.value)
       total += step.value.length
-      if (total >= maxBytes && Date.now() - started >= minMs) {
+      if (total >= SAMPLE_BYTES || Date.now() - started >= SAMPLE_READ_MS) {
         capped = true
         void reader.cancel()
         break
@@ -418,8 +453,9 @@ async function readLimited(
   } catch {
     aborted = true
   } finally {
-    window.clearTimeout(timer)
+    limit.clear()
   }
+  const readMs = Date.now() - started
   const bytes = new Uint8Array(total)
   let offset = 0
   for (const chunk of chunks) {
@@ -427,17 +463,19 @@ async function readLimited(
     offset += chunk.length
   }
   const headerSize = Number(response.headers.get('content-length') || 0)
-  return { bytes, aborted, capped, size: headerSize || total, headerSize }
+  return { bytes, aborted, capped, size: headerSize || total, headerSize, waitMs: started - sent, readMs }
 }
 
+/** ratio 为 0 表示没测出速度（没测或分片超时），只在别的线路都不行时才用。 */
 type ProbeEntry = PlayLine & { mediaUrl?: string; playUrl?: string; ratio?: number; bitrate?: number }
 
-async function probeEntry(entry: PlayLine): Promise<ProbeEntry | null> {
-  const html = await fetchHtml(entry.playPath)
+/** 解析出这条线路的播放列表；measure 为真时再拉一个分片测速。 */
+async function probeEntry(entry: PlayLine, signal: AbortSignal, measure: boolean): Promise<ProbeEntry | null> {
+  const html = await fetchHtml(entry.playPath, signal)
   const master = parsePlay(html)
-  const playlist = await readPlaylist(master)
+  const playlist = await readPlaylist(master, signal)
   const variantUrl = chooseVariant(playlist.text, playlist.url)
-  const media = variantUrl === playlist.url ? playlist : await readPlaylist(variantUrl)
+  const media = variantUrl === playlist.url ? playlist : await readPlaylist(variantUrl, signal)
   const rows = media.text.split(/\r?\n/)
   const segments: { duration: number; url: string }[] = []
   for (let index = 0; index < rows.length; index += 1) {
@@ -449,41 +487,31 @@ async function probeEntry(entry: PlayLine): Promise<ProbeEntry | null> {
   }
   const sample = segments[Math.min(6, Math.max(segments.length - 1, 0))]
   if (!sample) return null
+  seedPlaylist(media.url, media.text)
+  const found = { ...entry, mediaUrl: media.url, playUrl: absolutePlayUrl(media.url), ratio: 0, bitrate: 0 }
+  if (!measure) return found
   const segmentUrl = new URL(sample.url, media.url).href
-  const started = Date.now()
-  const { bytes, aborted, capped, size, headerSize } = await readLimited(playProxy(segmentUrl), 4500)
-  const elapsed = Math.max((Date.now() - started) / 1000, 0.05)
+  const { bytes, aborted, capped, size, headerSize, waitMs, readMs } = await readLimited(playProxy(segmentUrl), signal)
+  if (aborted && bytes.length < 188) return found
   if (!looksLikeMedia(bytes) || !size || (aborted && !headerSize && !capped)) return null
+  // 只读了一部分时按读取速度推算整段要多久，等响应头的时间只算一次。
+  const fullMs = waitMs + (headerSize * Math.max(readMs, 50)) / bytes.length
   const ratio = headerSize
-    ? (bytes.length * sample.duration) / (elapsed * (headerSize || size))
-    : (bytes.length * 8) / (elapsed * 800_000)
+    ? (sample.duration * 1000) / fullMs
+    : (bytes.length * 8) / ((Math.max(waitMs + readMs, 50) / 1000) * 800_000)
   const bitrate = sample.duration > 0 ? ((headerSize || size) * 8) / sample.duration : 0
-  return {
-    ...entry,
-    mediaUrl: media.url,
-    playUrl: absolutePlayUrl(media.url),
-    ratio,
-    bitrate,
-  }
+  return { ...found, ratio, bitrate }
 }
 
-export async function loadHome(): Promise<{ videos: VideoItem[] }> {
-  if (homeCache && Date.now() - homeAt < 3 * 60 * 1000) return homeCache
-  const homeHtml = await fetchHtml('/')
-  let videos = [...parseCarousel(homeHtml), ...parseCards(homeHtml, 'movie')]
-  const channels = await Promise.all(
-    CHANNELS.map(async (channel) => {
-      try {
-        return parseCards(await fetchHtml(channel.path), channel.id)
-      } catch {
-        return []
-      }
-    }),
-  )
-  for (const list of channels) videos = merge(videos, list)
-  homeCache = { videos }
-  homeAt = Date.now()
-  return homeCache
+/** 首页和各频道页同时拉，哪页先到先交出去；全部失败才算失败。 */
+export async function loadHome(onPart: (videos: VideoItem[], home: boolean) => void): Promise<void> {
+  const parts = [
+    fetchHtml('/').then((html) => onPart([...parseCarousel(html), ...parseCards(html, 'movie')], true)),
+    ...CHANNELS.map((channel) => fetchHtml(channel.path).then((html) => onPart(parseCards(html, channel.id), false))),
+  ]
+  const results = await Promise.allSettled(parts)
+  const failed = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+  if (failed.length === results.length) throw failed[0].reason
 }
 
 export async function loadDetail(id: string): Promise<VideoItem> {
@@ -491,57 +519,142 @@ export async function loadDetail(id: string): Promise<VideoItem> {
   return parseDetail(await fetchHtml(`/detail/${id}.html`), id)
 }
 
+/**
+ * 搜索要带片库页面里的口令 t，口令会过期，过期时照样返回 0 条。
+ * 先用记住的口令；搜到 0 条且结果页给了不同的口令，就换上再搜一次。
+ */
 export async function loadSearch(keyword: string): Promise<VideoItem[]> {
   const q = keyword.trim()
   if (!q) return []
-  if (!searchToken) await fetchHtml('/')
-  const query = `k=${encodeURIComponent(q)}${searchToken ? `&t=${encodeURIComponent(searchToken)}` : ''}`
-  return parseSearch(await fetchHtml(`/search?${query}`))
+  if (tokenWarming) await tokenWarming
+  const read = async (token: string) => {
+    const html = await fetchHtml(`/search?k=${encodeURIComponent(q)}${token ? `&t=${encodeURIComponent(token)}` : ''}`)
+    return { items: parseSearch(html), token: html.match(/name="t" value="([^"]+)"/)?.[1] || '' }
+  }
+  const used = searchToken.value
+  const first = await read(used)
+  if (first.items.length || !first.token || first.token === used) return first.items
+  return (await read(first.token)).items
 }
 
-export async function loadPlay(entries: PlayLine[], only = false): Promise<{ url: string; line: string }> {
-  const list = entries.filter((entry) => PLAY_PATH.test(entry.playPath))
-  if (!list.length) throw new Error('没有播放地址')
-  const key = `${only ? '1' : '0'}:${list.map((entry) => entry.playPath).join('|')}`
-  const cached = playCache.get(key)
-  if (cached && Date.now() - cached.at < 5 * 60 * 1000) return cached.value
+/** 要开始输入时，口令放久了就先换个新的，真正搜索时只要一次请求。 */
+export function warmSearchToken(): void {
+  if (tokenWarming || Date.now() - searchToken.at < TOKEN_FRESH_MS) return
+  tokenWarming = fetchHtml('/search?k=')
+    .catch(() => undefined)
+    .finally(() => {
+      tokenWarming = null
+    })
+}
+
+/** 够流畅的里挑码率最低的，都不够就挑最快的。 */
+function bestOf(pool: ProbeEntry[]): ProbeEntry {
+  const steady = pool.filter((item) => (item.ratio || 0) >= STEADY_RATIO)
+  if (steady.length) return [...steady].sort((a, b) => (a.bitrate || Infinity) - (b.bitrate || Infinity))[0]
+  return [...pool].sort((a, b) => (b.ratio || 0) - (a.ratio || 0))[0]
+}
+
+/**
+ * 同时测几条线路，测挂一条或测得太久就补上下一条。排在前面的线路够快就用它；
+ * 否则第一条测出速度的线路测完后再等一小会儿，从已测完的里挑；都没测出速度，就用排在最前、播放列表正常的那条。
+ * 选定后其余请求全部取消。
+ */
+function raceLines(picked: PlayLine[]): Promise<ProbeEntry> {
+  const controllers = picked.map(() => new AbortController())
+  const results: Array<ProbeEntry | null | undefined> = picked.map(() => undefined)
+  const timers: number[] = []
+  return new Promise((resolve, reject) => {
+    let settled = false
+    let graceStarted = false
+    let next = 0
+    const finish = (entry: ProbeEntry | undefined) => {
+      if (settled) return
+      settled = true
+      for (const timer of timers) window.clearTimeout(timer)
+      for (const controller of controllers) controller.abort()
+      if (entry) resolve(entry)
+      else reject(new Error('这一集没有可播放的线路'))
+    }
+    const decide = (late: boolean) => {
+      for (const result of results) {
+        if (result === undefined && !late) break
+        if (result && (result.ratio || 0) >= GOOD_RATIO) return finish(result)
+      }
+      const pool = results.filter((result): result is ProbeEntry => Boolean(result?.ratio))
+      if (late && pool.length) return finish(bestOf(pool))
+      if (results.some((result) => result === undefined)) return
+      finish(pool.length ? bestOf(pool) : results.find((result): result is ProbeEntry => Boolean(result)))
+    }
+    const launch = () => {
+      if (settled || next >= picked.length) return
+      const index = next
+      next += 1
+      const slow = window.setTimeout(launch, SLOW_LINE_MS)
+      timers.push(slow)
+      probeEntry(picked[index], controllers[index].signal, true)
+        .catch(() => null)
+        .then((found) => {
+          window.clearTimeout(slow)
+          results[index] = found?.playUrl ? found : null
+          if (settled) return
+          if (!results[index]?.ratio) launch()
+          else if (!graceStarted) {
+            graceStarted = true
+            timers.push(window.setTimeout(() => decide(true), PICK_GRACE_MS))
+          }
+          decide(false)
+        })
+    }
+    for (let lane = 0; lane < Math.min(RACE_LANES, picked.length); lane += 1) launch()
+  })
+}
+
+function pickLines(list: PlayLine[]): PlayLine[] {
   const ranked = [...list].sort((a, b) => lineRank(a.label, a.note) - lineRank(b.label, b.note))
   const picked: PlayLine[] = []
   const textOf = (entry: PlayLine) => `${entry.label} ${entry.note}`
   const take = (match: (text: string) => boolean, limit: number) => {
     let count = 0
     for (const entry of ranked) {
-      if (only || picked.length >= 6 || count >= limit) return
+      if (picked.length >= 6 || count >= limit) return
       if (picked.includes(entry) || !match(textOf(entry))) continue
       picked.push(entry)
       count += 1
     }
   }
   const heavy = (text: string) => /蓝光|4K|超清|1080|原画/.test(text)
-  if (only) picked.push(ranked[0])
   take((text) => /标清/.test(text) && !heavy(text), 2)
   take((text) => /720/.test(text) && !heavy(text), 2)
   take((text) => /极速|播放快|流畅/.test(text) && !heavy(text), 2)
   take((text) => /大陆/.test(text) && !heavy(text), 1)
   take((text) => !heavy(text), 6)
   if (!picked.length) take(() => true, 3)
-  let pool: ProbeEntry[] = []
-  for (const entry of picked) {
-    const found = await probeEntry(entry).catch(() => null)
-    if (!found?.playUrl) continue
-    pool.push(found)
-    if (!only && (found.ratio || 0) >= 1.3) break
-  }
-  if (!pool.length) throw new Error('这一集没有可播放的线路')
-  const sustainable = pool.filter((item) => (item.ratio || 0) >= 1.05)
-  const best = (sustainable.length ? sustainable : pool).sort((a, b) => {
-    if (sustainable.length) return (a.bitrate || Infinity) - (b.bitrate || Infinity)
-    return (b.ratio || 0) - (a.ratio || 0)
-  })[0]
-  const value = {
-    url: absolutePlayUrl(best.playUrl || best.mediaUrl || ''),
-    line: [best.label, best.note].filter(Boolean).join(' · '),
-  }
-  playCache.set(key, { at: Date.now(), value })
-  return value
+  return picked
+}
+
+/** only：用户点名的线路，不测速直接用，慢不慢由用户自己判断。只有一条线路时也不用测。 */
+export async function loadPlay(entries: PlayLine[], only = false): Promise<{ url: string; line: string }> {
+  const list = entries.filter((entry) => PLAY_PATH.test(entry.playPath))
+  if (!list.length) throw new Error('没有播放地址')
+  const key = `${only ? '1' : '0'}:${list.map((entry) => entry.playPath).join('|')}`
+  const cached = playCache.get(key)
+  if (cached && Date.now() - cached.at < 5 * 60 * 1000) return cached.value
+  const running = playLoads.get(key)
+  if (running) return running
+  const task = (async () => {
+    const picked = pickLines(list)
+    const best =
+      only || picked.length === 1
+        ? await probeEntry(picked[0], new AbortController().signal, false).catch(() => null)
+        : await raceLines(picked)
+    if (!best?.playUrl) throw new Error('这一集没有可播放的线路')
+    const value = {
+      url: absolutePlayUrl(best.playUrl || best.mediaUrl || ''),
+      line: [best.label, best.note].filter(Boolean).join(' · '),
+    }
+    playCache.set(key, { at: Date.now(), value })
+    return value
+  })().finally(() => playLoads.delete(key))
+  playLoads.set(key, task)
+  return task
 }

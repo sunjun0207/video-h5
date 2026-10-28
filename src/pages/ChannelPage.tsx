@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { channelFacets, channelName, queryChannel } from '../lib/api'
+import { channelFacets, channelName, listByChannel, queryChannel } from '../lib/api'
 import { useCatalog } from '../lib/source'
 import type { ChannelId, SortKey } from '../lib/types'
 import { PosterCard } from '../components/PosterCard'
@@ -16,7 +16,7 @@ const SORTS: { id: SortKey; label: string }[] = [
 ]
 
 export function ChannelPage({ channel }: Props) {
-  const { ready, error } = useCatalog()
+  const { ready, loading, error } = useCatalog()
   const [genre, setGenre] = useState('全部')
   const [region, setRegion] = useState('全部')
   const [year, setYear] = useState('全部')
@@ -33,7 +33,7 @@ export function ChannelPage({ channel }: Props) {
   const list = queryChannel({ channel, genre, region, year, sort })
 
   if (error) return <div className="wrap empty">{error}</div>
-  if (!ready) {
+  if (!ready || (loading && !listByChannel(channel).length)) {
     return (
       <div className="wrap">
         <Pending text="这一栏还在轻轻赶来。" />

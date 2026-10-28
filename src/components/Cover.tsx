@@ -17,6 +17,8 @@ export function Cover({ src }: Props) {
     <img
       src={url}
       alt=""
+      loading="lazy"
+      decoding="async"
       onError={() => {
         const next = nextCover(url)
         setUrl(next && next !== url ? next : '')
