@@ -1,4 +1,5 @@
 import type { ChannelId, PlayLine, VideoItem } from './types'
+import { cleanAds } from './adScan'
 import { stripInjectedAds } from './hlsAds'
 import { absolutePlayUrl, coverUrl, playProxy, seedPlaylist, upstreamFromPlay, useProxy, VOD_COOKIE_PATH, vodUrl } from './mediaProxy'
 import { sha1 } from './sha1'
@@ -406,6 +407,22 @@ function looksLikeMedia(buf: Uint8Array): boolean {
   return head.includes('ftyp')
 }
 
+/** AES-128 加密的列表，返回密钥地址；分片是密文，看不出是不是视频，改为确认密钥拿得到。 */
+function aesKeyUrl(text: string, playlistUrl: string): string {
+  const line = text.match(/#EXT-X-KEY:(?![^\n]*METHOD=NONE)[^\n]*/)?.[0] || ''
+  const uri = /METHOD=AES-128/.test(line) ? line.match(/URI="([^"]+)"/)?.[1] : ''
+  return uri ? new URL(uri, playlistUrl).href : ''
+}
+
+async function keyReady(url: string, signal: AbortSignal): Promise<boolean> {
+  try {
+    const response = await fetch(playProxy(url), { signal, credentials: useProxy ? 'same-origin' : 'omit' })
+    return response.ok && (await response.arrayBuffer()).byteLength === 16
+  } catch {
+    return false
+  }
+}
+
 type Sample = {
   bytes: Uint8Array
   aborted: boolean
@@ -467,7 +484,7 @@ async function readLimited(url: string, signal: AbortSignal): Promise<Sample> {
 }
 
 /** ratio 为 0 表示没测出速度（没测或分片超时），只在别的线路都不行时才用。 */
-type ProbeEntry = PlayLine & { mediaUrl?: string; playUrl?: string; ratio?: number; bitrate?: number }
+type ProbeEntry = PlayLine & { mediaUrl?: string; mediaText?: string; playUrl?: string; ratio?: number; bitrate?: number }
 
 /** 解析出这条线路的播放列表；measure 为真时再拉一个分片测速。 */
 async function probeEntry(entry: PlayLine, signal: AbortSignal, measure: boolean): Promise<ProbeEntry | null> {
@@ -488,12 +505,15 @@ async function probeEntry(entry: PlayLine, signal: AbortSignal, measure: boolean
   const sample = segments[Math.min(6, Math.max(segments.length - 1, 0))]
   if (!sample) return null
   seedPlaylist(media.url, media.text)
-  const found = { ...entry, mediaUrl: media.url, playUrl: absolutePlayUrl(media.url), ratio: 0, bitrate: 0 }
+  const found = { ...entry, mediaUrl: media.url, mediaText: media.text, playUrl: absolutePlayUrl(media.url), ratio: 0, bitrate: 0 }
   if (!measure) return found
+  const keyUrl = aesKeyUrl(media.text, media.url)
+  const keyed = keyUrl ? keyReady(keyUrl, signal) : null
   const segmentUrl = new URL(sample.url, media.url).href
   const { bytes, aborted, capped, size, headerSize, waitMs, readMs } = await readLimited(playProxy(segmentUrl), signal)
   if (aborted && bytes.length < 188) return found
-  if (!looksLikeMedia(bytes) || !size || (aborted && !headerSize && !capped)) return null
+  const playable = keyed ? bytes.length >= 188 && (await keyed) : looksLikeMedia(bytes)
+  if (!playable || !size || (aborted && !headerSize && !capped)) return null
   // 只读了一部分时按读取速度推算整段要多久，等响应头的时间只算一次。
   const fullMs = waitMs + (headerSize * Math.max(readMs, 50)) / bytes.length
   const ratio = headerSize
@@ -648,6 +668,7 @@ export async function loadPlay(entries: PlayLine[], only = false): Promise<{ url
         ? await probeEntry(picked[0], new AbortController().signal, false).catch(() => null)
         : await raceLines(picked)
     if (!best?.playUrl) throw new Error('这一集没有可播放的线路')
+    if (best.mediaUrl && best.mediaText) void cleanAds(best.mediaText, best.mediaUrl)
     const value = {
       url: absolutePlayUrl(best.playUrl || best.mediaUrl || ''),
       line: [best.label, best.note].filter(Boolean).join(' · '),

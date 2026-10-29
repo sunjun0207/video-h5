@@ -45,6 +45,44 @@ function keptOfDropped(lines: string[]): string[] {
   })
 }
 
+/** 按 drop 去掉对应的组；开头多出来的 DISCONTINUITY 一并去掉。 */
+function emit(blocks: Block[], drop: boolean[]): string {
+  const out: string[] = []
+  let emitted = false
+  blocks.forEach((block, index) => {
+    if (drop[index]) {
+      out.push(...keptOfDropped(block.lines))
+      return
+    }
+    for (const line of block.lines) {
+      const row = line.trim()
+      if (isDiscontinuity(row) && !emitted) continue
+      if (row && !row.startsWith('#')) emitted = true
+      out.push(line)
+    }
+  })
+  return out.join('\n')
+}
+
+/** 有分片的一组：在列表里是第几块、第一个分片地址、时长和分片数。 */
+export type GroupSpan = { block: number; first: string; duration: number; parts: number }
+
+/** 按播放顺序列出有分片的组。 */
+export function groupSpans(text: string): GroupSpan[] {
+  return blocksOf(text).flatMap((block, index) =>
+    block.uris.length ? [{ block: index, first: block.uris[0], duration: block.duration, parts: block.uris.length }] : [],
+  )
+}
+
+/** 去掉 spans 里下标在 ads 中的组；会把分片全删光时原样返回。 */
+export function dropGroups(text: string, spans: GroupSpan[], ads: Set<number>): string {
+  const blocks = blocksOf(text)
+  const drop = blocks.map(() => false)
+  for (const index of ads) if (spans[index]) drop[spans[index].block] = true
+  if (blocks.every((block, index) => drop[index] || !block.uris.length)) return text
+  return emit(blocks, drop)
+}
+
 /**
  * 去掉播放列表里能直接认出来的广告组：
  * `# ppvod-ad-injected` 标记后的一组、路径带 /adjump/ 的组、分片地址在列表里重复出现的组。
@@ -66,22 +104,7 @@ export function stripInjectedAds(text: string): string {
   )
   const kept = blocks.reduce((sum, block, index) => sum + (drop[index] ? 0 : block.uris.length), 0)
   if (!drop.includes(true) || kept === 0) return text
-
-  const out: string[] = []
-  let emitted = false
-  blocks.forEach((block, index) => {
-    if (drop[index]) {
-      out.push(...keptOfDropped(block.lines))
-      return
-    }
-    for (const line of block.lines) {
-      const row = line.trim()
-      if (isDiscontinuity(row) && !emitted) continue
-      if (row && !row.startsWith('#')) emitted = true
-      out.push(line)
-    }
-  })
-  return out.join('\n')
+  return emit(blocks, drop)
 }
 
 /** 下载时每组第一个分片读出来的信息。 */
@@ -99,6 +122,11 @@ export type GroupHead = {
 const BREAK_MAX = 120
 /** 片头、片尾广告最长多久。 */
 const EDGE_MAX = 60
+
+/** 每组都比中插广告最长还长时，按时间线也认不出广告，不用去读各组开头。 */
+export function mayHideAds(spans: GroupSpan[]): boolean {
+  return spans.some((span) => span.duration <= BREAK_MAX)
+}
 
 function near(start: number, expected: number, parts: number): boolean {
   return Math.abs(start - expected) <= 1 + parts * 0.01

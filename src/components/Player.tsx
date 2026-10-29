@@ -1,8 +1,15 @@
 import { useEffect, useRef, useState } from 'react'
-import Hls from 'hls.js'
+import Hls, { type XhrLoader } from 'hls.js'
+import { cleanAds } from '../lib/adScan'
 import { absolutePlayUrl, rewritePlaylist, takePlaylist, upstreamFromPlay, useProxy } from '../lib/mediaProxy'
 import { reportPlayback } from '../lib/playback'
+import { createPrefetcher } from '../lib/prefetch'
 import type { Episode } from '../lib/types'
+
+/** 正在拉的分片之外，最多再提前并行拉几个。 */
+const PREFETCH_AHEAD = 3
+/** 缓冲不到这么多秒时只多拉一个，带宽先给眼下要用的分片。 */
+const PREFETCH_DEEP_AT = 10
 
 type Props = {
   episode: Episode
@@ -123,20 +130,40 @@ export function Player({ episode, resumeAt, loadError = '', onTime, onEnded }: P
         timeoutRetry: { maxNumRetry: 4, retryDelayMs: 400, maxRetryDelayMs: 4000 },
         errorRetry: { maxNumRetry: 6, retryDelayMs: 800, maxRetryDelayMs: 8000 },
       }
-      const BaseLoader = Hls.DefaultConfig.loader
+      const prefetch = createPrefetcher(PREFETCH_AHEAD, useProxy ? 'same-origin' : 'omit')
+      /** 每档清晰度的分片地址，按 sn 排；预取靠它知道接下来是哪几个。 */
+      const tracks = new Map<string, { startSN: number; urls: string[] }>()
+      /** 第一个分片到了才开始预取，起播时带宽先给它。 */
+      let primed = false
+      const BaseLoader = Hls.DefaultConfig.loader as unknown as typeof XhrLoader
       class ProxyLoader extends BaseLoader {
-        private seedTimer = 0
+        /** 还在等的异步步骤（预置列表、去广告、预取的分片），中止时调用。 */
+        private release: (() => void) | null = null
         load(context: any, config: any, callbacks: any) {
           const original = String(context.url)
           const upstream = upstreamFromPlay(original) || original
           if (useProxy) context.url = absolutePlayUrl(upstream)
+          if (context.type === 'media-fragment') {
+            this.loadFragment(original, context, config, callbacks)
+            return
+          }
           const onSuccess = callbacks.onSuccess
           callbacks.onSuccess = (response: { data: unknown }, stats: unknown, ctx: { url: string }, networkDetails?: XMLHttpRequest | null) => {
-            const finalUpstream = upstreamFromPlay(networkDetails?.responseURL || ctx.url) || upstream
-            if (typeof response.data === 'string' && response.data.includes('#EXTM3U')) {
-              response.data = rewritePlaylist(response.data, finalUpstream)
+            const data = response.data
+            if (typeof data !== 'string' || !data.includes('#EXTM3U')) {
+              onSuccess(response, stats, ctx, networkDetails)
+              return
             }
-            onSuccess(response, stats, ctx, networkDetails)
+            const finalUpstream = upstreamFromPlay(networkDetails?.responseURL || ctx.url) || upstream
+            let waiting = true
+            this.release = () => {
+              waiting = false
+            }
+            void cleanAds(data, finalUpstream).then((cleaned) => {
+              if (!waiting) return
+              this.release = null
+              onSuccess({ ...response, data: rewritePlaylist(cleaned, finalUpstream) }, stats, ctx, networkDetails)
+            })
           }
           const seeded = context.type === 'manifest' || context.type === 'level' ? takePlaylist(upstream) : null
           if (!seeded) {
@@ -147,16 +174,69 @@ export function Player({ episode, resumeAt, loadError = '', onTime, onEnded }: P
           stats.loading.start = stats.loading.first = stats.loading.end = self.performance.now()
           stats.loaded = stats.total = seeded.length
           this.context = context
-          this.seedTimer = window.setTimeout(() => {
+          this.config = config
+          this.callbacks = callbacks
+          const timer = window.setTimeout(() => {
             callbacks.onSuccess({ url: context.url, data: seeded, code: 200 }, stats, context, null)
           }, 0)
+          this.release = () => window.clearTimeout(timer)
+        }
+        /** 已经预取的分片直接交给 hls.js；预取迟迟没回应就照常重新请求。 */
+        private loadFragment(original: string, context: any, config: any, callbacks: any) {
+          const frag = context.frag
+          const plain = !context.rangeEnd && !context.resetIV && typeof frag.sn === 'number'
+          const entry = plain ? prefetch.take(original) : undefined
+          const track = tracks.get(`${frag.type}:${frag.level}`)
+          if (plain && track && primed) {
+            prefetch.plan(track.urls, frag.sn - track.startSN + 1, bufferedAhead() >= PREFETCH_DEEP_AT ? PREFETCH_AHEAD : 1)
+          }
+          if (!entry) {
+            super.load(context, config, callbacks)
+            return
+          }
+          const stats = this.stats
+          stats.loading.start = self.performance.now()
+          this.context = context
+          this.config = config
+          this.callbacks = callbacks
+          const policy = config.loadPolicy
+          let timer = 0
+          const release = () => {
+            window.clearTimeout(timer)
+            this.release = null
+            entry.controller.abort()
+          }
+          const fallback = () => {
+            if (this.release !== release) return
+            release()
+            stats.loading.start = 0
+            super.load(context, config, callbacks)
+          }
+          const watch = () => {
+            if (entry.endAt) return
+            const age = self.performance.now() - entry.startedAt
+            if ((!entry.firstAt && age >= policy.maxTimeToFirstByteMs) || age >= policy.maxLoadTimeMs) fallback()
+            else timer = window.setTimeout(watch, 1000)
+          }
+          this.release = release
+          watch()
+          entry.promise.then((data) => {
+            if (this.release !== release) return
+            window.clearTimeout(timer)
+            this.release = null
+            stats.loading.first = Math.max(entry.firstAt, stats.loading.start)
+            stats.loading.end = Math.max(self.performance.now(), stats.loading.first)
+            stats.loaded = stats.total = data.byteLength
+            stats.bwEstimate = (stats.total * 8000) / Math.max(1, stats.loading.end - stats.loading.first)
+            callbacks.onSuccess({ url: context.url, data, code: 200 }, stats, context, null)
+          }, fallback)
         }
         abort() {
-          window.clearTimeout(this.seedTimer)
+          this.release?.()
           super.abort()
         }
         destroy() {
-          window.clearTimeout(this.seedTimer)
+          this.release?.()
           super.destroy()
         }
       }
@@ -171,9 +251,9 @@ export function Player({ episode, resumeAt, loadError = '', onTime, onEnded }: P
         abrEwmaDefaultEstimate: 900_000,
         abrBandWidthFactor: 0.8,
         abrBandWidthUpFactor: 0.5,
-        maxBufferLength: 24,
-        maxMaxBufferLength: 48,
-        maxBufferSize: 28 * 1000 * 1000,
+        maxBufferLength: 60,
+        maxMaxBufferLength: 120,
+        maxBufferSize: 60 * 1000 * 1000,
         backBufferLength: 12,
         startFragPrefetch: true,
         maxBufferHole: 0.5,
@@ -188,8 +268,15 @@ export function Player({ episode, resumeAt, loadError = '', onTime, onEnded }: P
       hls.attachMedia(video)
       hls.on(Hls.Events.FRAG_BUFFERED, () => start())
       hls.on(Hls.Events.LEVEL_LOADED, (_, data) => {
-        if (!data.details.live) armEnd(data.details.totalduration)
+        const { details } = data
+        if (!details.live) armEnd(details.totalduration)
+        if (details.fragments.some((frag) => frag.byteRange.length)) tracks.delete(`main:${data.level}`)
+        else tracks.set(`main:${data.level}`, { startSN: details.startSN, urls: details.fragments.map((frag) => frag.url) })
       })
+      hls.once(Hls.Events.FRAG_LOADED, () => {
+        primed = true
+      })
+      hls.on(Hls.Events.DESTROYING, () => prefetch.clear())
       hls.on(Hls.Events.MEDIA_ENDED, () => finish())
       let recovers = 0
       hls.on(Hls.Events.ERROR, (_, data) => {
