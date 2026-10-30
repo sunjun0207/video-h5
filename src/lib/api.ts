@@ -2,7 +2,9 @@ import { CHANNELS } from './catalog'
 import type { ChannelId, ChannelQuery, Episode, VideoItem } from './types'
 
 /** 片单存在本地，下次打开先用旧的，后台再刷新。 */
-const STORE_KEY = 'video_h5_catalog_v1'
+const STORE_KEY = 'video_h5_catalog_v2'
+/** 旧版片单把首页的剧集、综艺都记成了电影，直接丢掉重拉。 */
+const LEGACY_KEYS = ['video_h5_catalog_v1']
 const STORE_MAX = 600
 /** 只给最近看过详情的这么多部存选集，避免撑爆 localStorage。 */
 const STORE_DETAILS = 40
@@ -15,6 +17,7 @@ const listeners = new Set<() => void>()
 
 function readStore() {
   try {
+    for (const key of LEGACY_KEYS) localStorage.removeItem(key)
     const raw = localStorage.getItem(STORE_KEY)
     if (!raw) return
     const data = JSON.parse(raw) as { homeAt?: number; items?: VideoItem[] }
@@ -107,6 +110,7 @@ export function resetHomeRank(): void {
   for (const item of videos) {
     item.hot = Math.min(item.hot, 1)
     item.featured = false
+    item.fresh = undefined
   }
 }
 
@@ -135,7 +139,11 @@ export function mergeVideos(list: VideoItem[]): void {
     if (item.badge) prev.badge = item.badge
     if (item.featured) prev.featured = true
     if (item.hot > prev.hot) prev.hot = item.hot
-    if (item.channel && prev.channel === 'movie' && item.channel !== 'movie') prev.channel = item.channel
+    if ((item.fresh || 0) > (prev.fresh || 0)) prev.fresh = item.fresh
+    if (prev.guessed && !item.guessed) {
+      prev.channel = item.channel
+      prev.guessed = undefined
+    }
     if (!prev.episodes.length && item.updateText) prev.updateText = item.updateText
   }
   videos = [...videos, ...added]
@@ -167,8 +175,13 @@ export function rankVideos(limit = 8): VideoItem[] {
   return [...videos].sort((a, b) => b.hot - a.hot).slice(0, limit)
 }
 
+/** 频道是猜的不算，免得剧集、综艺混进电影里。 */
+function inChannel(item: VideoItem, channel: ChannelId): boolean {
+  return item.channel === channel && !item.guessed
+}
+
 export function listByChannel(channel: ChannelId): VideoItem[] {
-  return videos.filter((item) => item.channel === channel).sort((a, b) => b.hot - a.hot)
+  return videos.filter((item) => inChannel(item, channel)).sort((a, b) => b.hot - a.hot)
 }
 
 export function suggestVideos(keyword: string, limit = 8): VideoItem[] {
@@ -182,21 +195,88 @@ export function suggestVideos(keyword: string, limit = 8): VideoItem[] {
     .slice(0, limit)
 }
 
-export function hotVideos(limit = 12): VideoItem[] {
-  return rankVideos(limit)
+export type HomeLayout = {
+  hero: VideoItem[]
+  rank: VideoItem[]
+  picks: VideoItem[]
+  fresh: VideoItem[]
+  channels: { channel: ChannelId; items: VideoItem[] }[]
+  top: VideoItem[]
+}
+
+/**
+ * 首页从上到下：轮播、热门推荐、猜你喜欢、最新上线、各频道、高分推荐。
+ * 前面的栏目放过的，后面就不再放，同一部只出现一次。
+ */
+export function homeLayout(watched: string[]): HomeLayout {
+  const shown = new Set<string>()
+  const take = (list: VideoItem[], limit: number) => {
+    const picked: VideoItem[] = []
+    for (const item of list) {
+      if (picked.length >= limit) break
+      if (shown.has(item.id)) continue
+      shown.add(item.id)
+      picked.push(item)
+    }
+    return picked
+  }
+  const ranked = rankVideos(videos.length)
+  const seen = new Set(watched)
+  return {
+    hero: take(heroVideos(), 8),
+    rank: take(ranked, 8),
+    picks: take(mixChannels(ranked.filter((item) => !seen.has(item.id)), watched), 12),
+    fresh: take(
+      videos.filter((item) => item.fresh).sort((a, b) => (b.fresh || 0) - (a.fresh || 0)),
+      12,
+    ),
+    channels: CHANNELS.map((channel) => ({
+      channel: channel.id,
+      items: take(ranked.filter((item) => inChannel(item, channel.id)), 12),
+    })),
+    top: take(
+      videos.filter((item) => item.score >= 7.5).sort((a, b) => b.score - a.score || b.hot - a.hot),
+      12,
+    ),
+  }
+}
+
+/** 各频道轮流出一部，看过哪类多，哪类排前面；频道没确定的单算一组。 */
+function mixChannels(ranked: VideoItem[], watched: string[]): VideoItem[] {
+  const weight = new Map<string, number>()
+  for (const id of watched) {
+    const item = getVideo(id)
+    if (item && !item.guessed) weight.set(item.channel, (weight.get(item.channel) || 0) + 1)
+  }
+  const groups = new Map<string, VideoItem[]>()
+  for (const item of ranked) {
+    const key = item.guessed ? '' : item.channel
+    const group = groups.get(key)
+    if (group) group.push(item)
+    else groups.set(key, [item])
+  }
+  const order = [...groups.keys()].sort((a, b) => (weight.get(b) || 0) - (weight.get(a) || 0))
+  const mixed: VideoItem[] = []
+  for (let round = 0; mixed.length < ranked.length; round += 1) {
+    for (const key of order) {
+      const item = groups.get(key)?.[round]
+      if (item) mixed.push(item)
+    }
+  }
+  return mixed
 }
 
 export function relatedVideos(id: string, limit = 6): VideoItem[] {
   const current = getVideo(id)
-  const ranked = rankVideos(videos.length)
-  if (!current) return ranked.slice(0, limit)
-  const same = ranked.filter((item) => item.id !== id && item.channel === current.channel)
-  const rest = ranked.filter((item) => item.id !== id && item.channel !== current.channel)
-  return [...same, ...rest].slice(0, limit)
+  const ranked = rankVideos(videos.length).filter((item) => item.id !== id)
+  if (!current || current.guessed) return ranked.slice(0, limit)
+  const same = ranked.filter((item) => inChannel(item, current.channel))
+  const picked = new Set(same.map((item) => item.id))
+  return [...same, ...ranked.filter((item) => !picked.has(item.id))].slice(0, limit)
 }
 
 export function channelFacets(channel: ChannelId) {
-  const list = videos.filter((item) => item.channel === channel)
+  const list = videos.filter((item) => inChannel(item, channel))
   const genres = unique(list.flatMap((item) => item.genres))
   const regions = unique(list.map((item) => item.region).filter(Boolean))
   const years = unique(list.map((item) => String(item.year)).filter((item) => item !== '0')).sort(
@@ -206,7 +286,7 @@ export function channelFacets(channel: ChannelId) {
 }
 
 export function queryChannel(query: ChannelQuery): VideoItem[] {
-  let list = videos.filter((item) => item.channel === query.channel)
+  let list = videos.filter((item) => inChannel(item, query.channel))
   if (query.genre !== '全部') list = list.filter((item) => item.genres.includes(query.genre))
   if (query.region !== '全部') list = list.filter((item) => item.region === query.region)
   if (query.year !== '全部') list = list.filter((item) => String(item.year) === query.year)

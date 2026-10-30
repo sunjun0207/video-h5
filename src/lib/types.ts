@@ -34,6 +34,10 @@ export type VideoItem = {
   tone: [string, string]
   mark: string
   featured?: boolean
+  /** 频道是猜的：片库首页的轮播和各类混排的分区没写是哪一类，等频道页、详情或搜索结果补上。 */
+  guessed?: boolean
+  /** 在片库首页「最近更新」里的名次，越大越新。 */
+  fresh?: number
   cover?: string
   episodes: Episode[]
   /** 详情页（选集、线路）拉到的时间。 */

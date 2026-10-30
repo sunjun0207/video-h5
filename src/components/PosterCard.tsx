@@ -35,7 +35,7 @@ export function PosterCard({ item, anchorId, marked, onOpen }: Props) {
       <span className="poster-art" style={{ background: `linear-gradient(155deg, ${item.tone[0]}, ${item.tone[1]})` }}>
         {item.cover ? <Cover src={item.cover} /> : <i>{item.mark}</i>}
         {item.badge ? <em className="poster-badge">{item.badge}</em> : null}
-        <span className="poster-ep">{item.updateText}</span>
+        {item.updateText && item.updateText !== item.badge ? <span className="poster-ep">{item.updateText}</span> : null}
         <span className="poster-play" aria-hidden>
           ▶
         </span>

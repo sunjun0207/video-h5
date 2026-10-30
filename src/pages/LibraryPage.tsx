@@ -38,9 +38,12 @@ export function LibraryPage({ mode, libraryVersion, onLibraryChange }: Props) {
     return (
       <div className="page">
         <div className="wrap">
-          <h1 className="page-title">收藏</h1>
+          <div className="page-head">
+            <h1 className="page-title">收藏</h1>
+            <p>收下的精彩，都在这里</p>
+          </div>
           {favorites.length === 0 ? (
-            <div className="empty">还没有留下的故事。遇见喜欢的，就把它放在这里。</div>
+            <EmptyHint />
           ) : (
             <div className="poster-grid">
               {favorites.map((item) => (
@@ -57,7 +60,10 @@ export function LibraryPage({ mode, libraryVersion, onLibraryChange }: Props) {
     <div className="page">
       <div className="wrap">
         <div className="block-head">
-          <h1 className="page-title">最近观看</h1>
+          <div className="page-head">
+            <h1 className="page-title">最近观看</h1>
+            <p>继续你的精彩旅程</p>
+          </div>
           {watched.length ? (
             <button
               type="button"
@@ -67,12 +73,12 @@ export function LibraryPage({ mode, libraryVersion, onLibraryChange }: Props) {
                 onLibraryChange()
               }}
             >
-              忘掉它们
+              清空记录
             </button>
           ) : null}
         </div>
         {watched.length === 0 ? (
-          <div className="empty">还没有看过的片子。先挑一部，让画面慢慢开始。</div>
+          <EmptyHint />
         ) : (
           <ul className="history-list">
             {watched.map(({ entry, item }) => (
@@ -84,16 +90,28 @@ export function LibraryPage({ mode, libraryVersion, onLibraryChange }: Props) {
                   <span>
                     <strong>{item.title}</strong>
                     <small>
-                      停在 {item.episodes[entry.ep]?.title ?? `第${entry.ep + 1}段`}
+                      看到 {item.episodes[entry.ep]?.title ?? `第${entry.ep + 1}集`}
                       {entry.time > 1 ? ` · ${formatClock(entry.time)}` : ''}
                     </small>
                   </span>
+                  <em className="history-go">接着看</em>
                 </a>
               </li>
             ))}
           </ul>
         )}
       </div>
+    </div>
+  )
+}
+
+function EmptyHint() {
+  return (
+    <div className="empty">
+      <p>暂时还没有内容，去发现更多精彩吧</p>
+      <a className="btn-play" href={href({ name: 'home' })}>
+        马上探索
+      </a>
     </div>
   )
 }

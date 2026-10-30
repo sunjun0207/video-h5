@@ -43,7 +43,7 @@ function sleep(ms: number) {
 /** 下载请求都标成低优先级，播放器的分片先走。 */
 async function pull(url: string, signal: AbortSignal, headers?: HeadersInit): Promise<Response> {
   const response = await fetch(url, { signal, credentials: credentialsFor(url), headers, priority: 'low' })
-  if (!response.ok) throw new Error('暂时收不下来')
+  if (!response.ok) throw new Error('下载遇到一点问题，请稍后再试')
   return response
 }
 
@@ -104,14 +104,14 @@ async function loadPlan(url: string, signal: AbortSignal): Promise<Plan> {
   const response = await pull(url, signal)
   const upstream = upstreamFromPlay(response.url || url) || response.url || url
   const text = rewritePlaylist(await response.text(), upstream)
-  if (!text.includes('#EXTM3U')) throw new Error('这一集暂时收不下来')
+  if (!text.includes('#EXTM3U')) throw new Error('这一集暂时下载不了，换条线路试试')
   if (text.includes('#EXT-X-STREAM-INF')) {
     const next = variantOf(text)
-    if (!next) throw new Error('这一集暂时收不下来')
+    if (!next) throw new Error('这一集暂时下载不了，换条线路试试')
     return loadPlan(next, signal)
   }
   const plan = mediaPlan(text)
-  if (!plan.parts.length) throw new Error('这一集暂时收不下来')
+  if (!plan.parts.length) throw new Error('这一集暂时下载不了，换条线路试试')
   return plan
 }
 
@@ -392,7 +392,7 @@ async function take(url: string, control: DownloadControl, meter: Meter, onSize?
       counted += bytes
       meter.add(bytes)
     })
-    if (!blob.size) throw new Error('暂时收不下来')
+    if (!blob.size) throw new Error('下载遇到一点问题，请稍后再试')
     onSize?.(blob.size)
     done = true
     return blob
@@ -449,13 +449,13 @@ async function takeSlice(url: string, start: number, end: number, control: Downl
     const response = await pull(url, control.signal, { Range: `bytes=${start}-${end}` })
     if (response.status !== 206) {
       await response.body?.cancel().catch(() => undefined)
-      throw new Error('暂时收不下来')
+      throw new Error('下载遇到一点问题，请稍后再试')
     }
     const blob = await readBody(response, control, (bytes) => {
       counted += bytes
       meter.add(bytes)
     })
-    if (blob.size < expect) throw new Error('暂时收不下来')
+    if (blob.size < expect) throw new Error('下载遇到一点问题，请稍后再试')
     done = true
     return blob.size === expect ? blob : blob.slice(0, expect)
   } catch (reason) {
@@ -503,7 +503,7 @@ async function downloadWhole(url: string, filename: string, control: DownloadCon
       },
     )
     if (control.stopped) return ''
-    if (pieces.some((piece) => !piece)) throw new Error('暂时收不下来')
+    if (pieces.some((piece) => !piece)) throw new Error('下载遇到一点问题，请稍后再试')
     blob = new Blob(pieces, { type: url.includes('.mp4') ? 'video/mp4' : 'video/mp2t' })
   } else {
     if (probe.total > 0) meter.setTotal(probe.total)
@@ -536,7 +536,7 @@ async function fetchMp4Parts(plan: Plan, filename: string, control: DownloadCont
     },
   )
   if (control.stopped) return ''
-  if (chunks.some((chunk) => !chunk)) throw new Error('暂时收不下来')
+  if (chunks.some((chunk) => !chunk)) throw new Error('下载遇到一点问题，请稍后再试')
   return saveBlob(new Blob(chunks, { type: 'video/mp4' }), `${filename}.mp4`)
 }
 
@@ -612,7 +612,7 @@ async function fetchTsParts(plan: Plan, filename: string, control: DownloadContr
         probes.set(index, await headOf(chunks[index]!))
       })
       if (control.stopped) return ''
-      if (heads.some((index) => !probes.has(index))) throw new Error('暂时收不下来')
+      if (heads.some((index) => !probes.has(index))) throw new Error('下载遇到一点问题，请稍后再试')
       const groups: GroupHead[] = heads.map((index) => {
         const head = probes.get(index)!
         const start = head.video ?? head.audio
@@ -641,7 +641,7 @@ async function fetchTsParts(plan: Plan, filename: string, control: DownloadContr
       fetchOne,
     )
     if (control.stopped) return ''
-    if (order.some((index) => !chunks[index])) throw new Error('暂时收不下来')
+    if (order.some((index) => !chunks[index])) throw new Error('下载遇到一点问题，请稍后再试')
     feed()
     await feeding
     if (remux) meter.pack()

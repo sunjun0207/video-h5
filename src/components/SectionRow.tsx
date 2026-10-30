@@ -4,29 +4,36 @@ import { PosterCard } from './PosterCard'
 
 type Props = {
   title: string
+  desc?: string
   more?: string
+  moreText?: string
   items: VideoItem[]
 }
 
-export function SectionRow({ title, more, items }: Props) {
+export function SectionRow({ title, desc, more, moreText = '更多精彩', items }: Props) {
   const size = 6
   const pages = Math.max(1, Math.ceil(items.length / size))
   const [page, setPage] = useState(0)
-  const slice = items.slice(page * size, page * size + size)
+  if (!items.length) return null
+  const at = page < pages ? page : 0
+  const slice = items.slice(at * size, at * size + size)
 
   return (
     <section className="block">
       <div className="block-head">
-        <h2>{title}</h2>
+        <div className="block-title">
+          <h2>{title}</h2>
+          {desc ? <p>{desc}</p> : null}
+        </div>
         <div className="block-actions">
           {pages > 1 ? (
-            <button type="button" className="text-btn" onClick={() => setPage((value) => (value + 1) % pages)}>
-              再换一批
+            <button type="button" className="text-btn" onClick={() => setPage((at + 1) % pages)}>
+              换一批
             </button>
           ) : null}
           {more ? (
-            <a className="text-btn" href={more}>
-              再往下看
+            <a className="text-btn more" href={more}>
+              {moreText}
             </a>
           ) : null}
         </div>

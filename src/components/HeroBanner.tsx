@@ -49,7 +49,7 @@ export function HeroBanner({ items }: Props) {
         className="hero-stage"
         style={{
           backgroundImage: cover
-            ? `linear-gradient(115deg, rgba(12,16,24,.25), rgba(12,16,24,.78)), url(${cover})`
+            ? `linear-gradient(180deg, rgba(14,8,28,.04) 0%, rgba(14,8,28,.42) 46%, rgba(14,8,28,.94) 100%), linear-gradient(115deg, rgba(139,92,246,.32), transparent 62%), url(${cover})`
             : `linear-gradient(115deg, ${current.tone[0]} 0%, ${current.tone[1]} 78%)`,
           backgroundSize: 'cover',
           backgroundPosition: 'center',
@@ -65,13 +65,13 @@ export function HeroBanner({ items }: Props) {
         </span>
         <span className="hero-actions">
           <a className="btn-play" href={href({ name: 'play', id: current.id, ep: 0 })}>
-            开始观看
+            立即观看
           </a>
           <a className="btn-ghost" href={href({ name: 'detail', id: current.id })}>
-            先认识它
+            马上探索
           </a>
         </span>
-        <div className="hero-dots" role="tablist" aria-label="焦点图">
+        <div className="hero-dots" role="tablist" aria-label="精彩推荐">
           {items.map((item, dot) => (
             <button
               key={item.id}

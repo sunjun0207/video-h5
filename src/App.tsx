@@ -2,6 +2,7 @@ import { lazy, Suspense, useCallback, useEffect, useState } from 'react'
 import { BottomNav } from './components/BottomNav'
 import { ChannelNav } from './components/ChannelNav'
 import { Header } from './components/Header'
+import { BRAND, SLOGAN } from './lib/catalog'
 import { addSearchHistory } from './lib/storage'
 import { href, parseHash, type Route } from './lib/router'
 import { ChannelPage } from './pages/ChannelPage'
@@ -44,8 +45,7 @@ export default function App() {
   }, [route.name])
 
   useEffect(() => {
-    const base = import.meta.env.VITE_APP_TITLE || '观影jun.sun'
-    document.title = route.name === 'home' ? base : `${pageTitle(route)} - ${base.replace(/ · .+$/, '')}`
+    document.title = route.name === 'home' ? `${BRAND} - ${SLOGAN}` : `${pageTitle(route)} - ${BRAND}`
   }, [route])
 
   const onSearch = (keyword: string) => {
@@ -74,7 +74,7 @@ export default function App() {
           <Suspense
             fallback={
               <div className="wrap">
-                <Pending text="正在把这一段请到眼前…" />
+                <Pending text="正在为你加载精彩内容…" />
               </div>
             }
           >
@@ -88,6 +88,12 @@ export default function App() {
           <LibraryPage mode="history" libraryVersion={libraryVersion} onLibraryChange={bump} />
         ) : null}
       </main>
+      {playing ? null : (
+        <footer className="site-footer">
+          <strong>{BRAND}</strong>
+          <span>年轻人的精彩视频世界。精彩不设限，快乐不打烊。</span>
+        </footer>
+      )}
       <BottomNav route={route} />
     </div>
   )
@@ -100,11 +106,11 @@ function pageTitle(route: Route): string {
     case 'channel':
       return '频道'
     case 'search':
-      return route.q ? route.q : '寻一部'
+      return route.q ? route.q : '搜一搜'
     case 'detail':
-      return '故事'
+      return '详情'
     case 'play':
-      return '观看'
+      return '正在观看'
     case 'favorite':
       return '收藏'
     case 'history':

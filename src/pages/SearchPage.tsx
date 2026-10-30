@@ -55,7 +55,7 @@ export function SearchPage({ keyword, libraryVersion, onLibraryChange, onSearch 
         setLoadedFor(q)
       })
       .catch((reason: unknown) => {
-        if (live) setError(reason instanceof Error ? reason.message : '搜索失败')
+        if (live) setError(reason instanceof Error ? reason.message : '网络开了个小差，请稍后再试')
       })
       .finally(() => {
         if (live) setPending(false)
@@ -88,12 +88,12 @@ export function SearchPage({ keyword, libraryVersion, onLibraryChange, onSearch 
   return (
     <div className="page">
       <div className="wrap">
-        <h1 className="page-title">{q ? `遇见「${q}」` : '寻一部'}</h1>
+        <h1 className="page-title">{q ? `「${q}」的精彩内容` : '搜一搜'}</h1>
         <SearchBox value={draft} onChange={setDraft} onSubmit={() => onSearch(draft)} />
         {!q ? (
           <section className="history-block">
             <div className="block-head">
-              <h2>最近寻过</h2>
+              <h2>最近搜过</h2>
               {history.length ? (
                 <button
                   type="button"
@@ -103,12 +103,12 @@ export function SearchPage({ keyword, libraryVersion, onLibraryChange, onSearch 
                     onLibraryChange()
                   }}
                 >
-                  忘掉它们
+                  清空
                 </button>
               ) : null}
             </div>
             {history.length === 0 ? (
-              <div className="empty">还没有写下名字。先寻一部，让故事慢慢到来。</div>
+              <div className="empty">暂时还没有搜索记录，去发现更多精彩吧</div>
             ) : (
               <div className="chips">
                 {history.map((item) => (
@@ -132,14 +132,14 @@ export function SearchPage({ keyword, libraryVersion, onLibraryChange, onSearch 
             )}
           </section>
         ) : pending ? (
-          <Pending text="正在轻轻寻找…" />
+          <Pending text="正在为你加载精彩内容…" />
         ) : error ? (
           <div className="empty">{error}</div>
         ) : list.length === 0 ? (
-          <div className="empty">没有遇见同名的片子。换个名字再试试。</div>
+          <div className="empty">没有找到相关内容，换个关键词试试</div>
         ) : (
           <>
-            <p className="result-count">遇见 {list.length} 部</p>
+            <p className="result-count">为你找到 {list.length} 部</p>
             <div className="poster-grid">
               {list.map((item) => (
                 <PosterCard
@@ -154,8 +154,8 @@ export function SearchPage({ keyword, libraryVersion, onLibraryChange, onSearch 
           </>
         )}
         <p className="search-hint">
-          也可以去<a href={href({ name: 'channel', channel: 'movie' })}>电影</a>或
-          <a href={href({ name: 'channel', channel: 'anime' })}>动漫</a>里慢慢翻。
+          没想好看什么？去<a href={href({ name: 'channel', channel: 'short' })}>短剧</a>、
+          <a href={href({ name: 'channel', channel: 'movie' })}>电影</a>里逛逛，发现更多精彩。
         </p>
       </div>
     </div>

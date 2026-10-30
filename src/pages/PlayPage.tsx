@@ -46,9 +46,9 @@ function formatPercent(ratio: number): string {
 function folderHint(file: string): string {
   const agent = navigator.userAgent
   const mobile = /Android|iPhone|iPad|iPod/i.test(agent) || (navigator.maxTouchPoints > 1 && /Macintosh/i.test(agent))
-  if (mobile) return `「${file}」在浏览器的「下载」里，iPhone / iPad 在「文件」App 的「下载」文件夹。`
+  if (mobile) return `「${file}」已保存到下载列表，iPhone / iPad 可以在「文件」App 的「下载」文件夹里找到。`
   const keys = /Macintosh/i.test(agent) ? '⌥⌘L' : 'Ctrl+J'
-  return `「${file}」在浏览器的下载文件夹里：按 ${keys} 打开下载列表，点「在文件夹中显示」。`
+  return `「${file}」已保存到下载文件夹：按 ${keys} 打开下载列表，点「在文件夹中显示」。`
 }
 
 function downloadText(phase: 'idle' | 'running' | 'paused', stat: DownloadProgress): string {
@@ -108,7 +108,7 @@ export function PlayPage({ id, ep, onLibraryChange }: Props) {
         if (live) setStream({ key: streamKey, url: result.url, line: result.line, path: result.playPath })
       })
       .catch((reason: unknown) => {
-        if (live) setError(reason instanceof Error ? reason.message : '这一段还没到来')
+        if (live) setError(reason instanceof Error ? reason.message : '播放遇到一点问题，换个方式再试试')
       })
     return () => {
       live = false
@@ -164,7 +164,7 @@ export function PlayPage({ id, ep, onLibraryChange }: Props) {
         saveControl.current = null
         setSavePhase('idle')
         setSaveStat(emptyStat)
-        setSaveNote('已经留下')
+        setSaveNote('下载完成')
         setSavedFile(file)
       })
       .catch((reason: unknown) => {
@@ -172,7 +172,7 @@ export function PlayPage({ id, ep, onLibraryChange }: Props) {
         saveControl.current = null
         setSavePhase('idle')
         setSaveStat(emptyStat)
-        setSaveNote(reason instanceof Error ? reason.message : '暂时收不下来')
+        setSaveNote(reason instanceof Error ? reason.message : '下载遇到一点问题，请稍后再试')
       })
   }
 
@@ -187,7 +187,7 @@ export function PlayPage({ id, ep, onLibraryChange }: Props) {
     if (error) return <div className="wrap empty">{error}</div>
     return (
       <div className="wrap">
-        <Pending text="正在加载中" />
+        <Pending text="正在为你加载精彩内容…" />
       </div>
     )
   }
@@ -233,8 +233,12 @@ export function PlayPage({ id, ep, onLibraryChange }: Props) {
           <div className="play-copy">
             <p className="crumb light">
               <a href={href({ name: 'home' })}>首页</a>
-              <span>/</span>
-              <a href={href({ name: 'channel', channel: item.channel })}>{channelName(item.channel)}</a>
+              {item.guessed ? null : (
+                <>
+                  <span>/</span>
+                  <a href={href({ name: 'channel', channel: item.channel })}>{channelName(item.channel)}</a>
+                </>
+              )}
             </p>
             <h1>{item.title}</h1>
             <p>
@@ -272,8 +276,8 @@ export function PlayPage({ id, ep, onLibraryChange }: Props) {
           {episode.lines && episode.lines.length > 1 ? (
             <>
               <div className="ep-panel-head">
-                <strong>一条路</strong>
-                <span>{lineName || '正在挑选'}</span>
+                <strong>线路</strong>
+                <span>{lineName || '正在为你挑选'}</span>
               </div>
               <div className="ep-grid dark">
                 {episode.lines.map((line) => (
@@ -290,7 +294,7 @@ export function PlayPage({ id, ep, onLibraryChange }: Props) {
             </>
           ) : null}
           <div className="ep-panel-head">
-            <strong>选一段</strong>
+            <strong>选集</strong>
             <span>
               {index + 1}/{item.episodes.length}
             </span>
@@ -307,7 +311,10 @@ export function PlayPage({ id, ep, onLibraryChange }: Props) {
       <div className="wrap play-related">
         <section className="block">
           <div className="block-head">
-            <h2>也许你也想看</h2>
+            <div className="block-title">
+              <h2>猜你喜欢</h2>
+              <p>懂你的喜好，推荐你的精彩</p>
+            </div>
           </div>
           <div className="poster-grid">
             {relatedVideos(item.id, 6).map((video) => (

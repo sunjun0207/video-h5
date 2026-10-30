@@ -101,13 +101,14 @@ export function SearchBox({ value, onChange, onSubmit }: Props) {
             closeTimer.current = window.setTimeout(() => setOpen(false), 180)
           }}
           onKeyDown={onKey}
-          placeholder="搜索影片"
-          aria-label="搜索影片"
+          placeholder="搜一搜，发现更多精彩"
+          aria-label="搜索片名或演员"
           aria-expanded={open && (items.length > 0 || pending)}
           aria-controls={listId}
           autoComplete="off"
+          enterKeyHint="search"
         />
-        <small>输入片名或演员</small>
+        <button type="submit">开始探索</button>
       </form>
       {open && (items.length > 0 || pending) ? (
         <ul className="suggest" id={listId} role="listbox" aria-busy={pending}>
@@ -125,7 +126,7 @@ export function SearchBox({ value, onChange, onSubmit }: Props) {
                 <span>
                   <strong>{item.title}</strong>
                   <small>
-                    {[channelName(item.channel), item.year || '', item.actors[0] || ''].filter(Boolean).join(' · ')}
+                    {[item.guessed ? '' : channelName(item.channel), item.year || '', item.actors[0] || ''].filter(Boolean).join(' · ')}
                   </small>
                 </span>
               </a>

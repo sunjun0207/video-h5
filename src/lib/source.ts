@@ -68,7 +68,7 @@ function refreshHome(): Promise<void> {
       setLibrary({ ready: videoCount() > 0, loading: false })
     })
     .catch((reason: unknown) => {
-      setLibrary({ loading: false, error: library.ready ? '' : messageOf(reason, '片库加载失败') })
+      setLibrary({ loading: false, error: library.ready ? '' : messageOf(reason, '网络开了个小差，请稍后再试') })
       throw reason
     })
     .finally(() => {
@@ -93,6 +93,11 @@ function fetchDetail(id: string): Promise<VideoItem> {
       if (current) {
         item.hot = current.hot || item.hot
         item.featured = current.featured || item.featured
+        item.fresh = current.fresh
+        if (item.guessed && !current.guessed) {
+          item.channel = current.channel
+          item.guessed = undefined
+        }
         if (!item.score && current.score) item.score = current.score
         if (!item.cover && current.cover) item.cover = current.cover
         if (!item.badge && current.badge) item.badge = current.badge
@@ -133,7 +138,7 @@ export function warmDetail(id: string): void {
 export async function ensurePlayUrl(id: string, ep: number, onlyPath = '', skip: string[] = []): Promise<PlayChoice> {
   const item = await ensureDetail(id)
   const episode = item.episodes[ep]
-  if (!episode) throw new Error('没有这一集')
+  if (!episode) throw new Error('没有找到这一集')
   const lines = (episode.lines?.length
     ? episode.lines
     : [{ label: episode.title, note: '', playPath: episode.playPath || '' }]

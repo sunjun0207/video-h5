@@ -312,7 +312,7 @@ export function Player({ episode, resumeAt, loadError = '', onTime, onEnded, onS
           hls.recoverMediaError()
           return
         }
-        setError('这一段暂时安静了，换一条路，或稍后再来。')
+        setError('播放遇到一点问题，换条线路或稍后再试试')
         setBooting(false)
       })
     } else {
@@ -342,7 +342,7 @@ export function Player({ episode, resumeAt, loadError = '', onTime, onEnded, onS
     if (!video) return
     if (video.paused) {
       endedRef.current = false
-      void video.play().catch(() => setError('这一段暂时安静了，换一段试试。'))
+      void video.play().catch(() => setError('播放遇到一点问题，换个方式再试试'))
     } else video.pause()
   }
 
@@ -412,7 +412,7 @@ export function Player({ episode, resumeAt, loadError = '', onTime, onEnded, onS
         onEnded={finish}
         onError={() => {
           if (episode.url && !giveUpRef.current()) {
-            setError('画面没有回应。换一段，或稍后再来。')
+            setError('播放遇到一点问题，换个方式再试试')
             setBooting(false)
           }
         }}
@@ -422,7 +422,7 @@ export function Player({ episode, resumeAt, loadError = '', onTime, onEnded, onS
       {!message && (booting || waiting) && !needTap ? (
         <div className="stage-loading" role="status">
           <span className="stage-spinner" aria-hidden />
-          <p>{booting ? '正在加载中' : '正在缓冲…'}</p>
+          <p>{booting ? '正在为你加载精彩内容…' : '正在缓冲…'}</p>
         </div>
       ) : null}
       {showPlay ? (

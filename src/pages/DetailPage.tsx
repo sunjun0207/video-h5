@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { channelName, getVideo, relatedVideos } from '../lib/api'
 import { href } from '../lib/router'
 import { ensureDetail, ensurePlayUrl, useVideos } from '../lib/source'
-import { isFavorite, toggleFavorite } from '../lib/storage'
+import { historyOf, isFavorite, toggleFavorite } from '../lib/storage'
 import { Cover } from '../components/Cover'
 import { PosterCard } from '../components/PosterCard'
 import { Pending } from '../components/Pending'
@@ -26,7 +26,7 @@ export function DetailPage({ id, libraryVersion, onLibraryChange }: Props) {
     let live = true
     setError('')
     ensureDetail(id).catch((reason: unknown) => {
-      if (live) setError(reason instanceof Error ? reason.message : '没有找到这部片子')
+      if (live) setError(reason instanceof Error ? reason.message : '没有找到相关内容')
     })
     return () => {
       live = false
@@ -46,11 +46,13 @@ export function DetailPage({ id, libraryVersion, onLibraryChange }: Props) {
   if (!item) {
     return (
       <div className="wrap">
-        <Pending text="故事还在路上…" />
+        <Pending text="正在为你加载精彩内容…" />
       </div>
     )
   }
   const saved = isFavorite(item.id)
+  const last = historyOf(item.id)
+  const resumeEp = last && last.ep < item.episodes.length ? last.ep : -1
   void libraryVersion
 
   return (
@@ -59,8 +61,12 @@ export function DetailPage({ id, libraryVersion, onLibraryChange }: Props) {
         <p className="crumb">
           <a href={href({ name: 'home' })}>首页</a>
           <span>/</span>
-          <a href={href({ name: 'channel', channel: item.channel })}>{channelName(item.channel)}</a>
-          <span>/</span>
+          {item.guessed ? null : (
+            <>
+              <a href={href({ name: 'channel', channel: item.channel })}>{channelName(item.channel)}</a>
+              <span>/</span>
+            </>
+          )}
           <em>{item.title}</em>
         </p>
         <section className="detail">
@@ -81,8 +87,8 @@ export function DetailPage({ id, libraryVersion, onLibraryChange }: Props) {
             <p className="detail-line">演职员：{item.actors.join('、')}</p>
             <p className="detail-summary">{item.summary}</p>
             <div className="detail-actions">
-              <a className="btn-play" href={href({ name: 'play', id: item.id, ep: 0 })}>
-                开始观看
+              <a className="btn-play" href={href({ name: 'play', id: item.id, ep: Math.max(resumeEp, 0) })}>
+                {resumeEp >= 0 ? '接着看，精彩别错过' : '立即观看'}
               </a>
               <button
                 type="button"
@@ -92,14 +98,14 @@ export function DetailPage({ id, libraryVersion, onLibraryChange }: Props) {
                   onLibraryChange()
                 }}
               >
-                {saved ? '已留下' : '留下它'}
+                {saved ? '已收藏' : '收下这份精彩'}
               </button>
             </div>
           </div>
         </section>
         <section className="block">
           <div className="block-head">
-            <h2>选一段</h2>
+            <h2>选集</h2>
             <span className="muted">{item.episodes.length} 集</span>
           </div>
           <div className="ep-grid">
@@ -112,7 +118,10 @@ export function DetailPage({ id, libraryVersion, onLibraryChange }: Props) {
         </section>
         <section className="block">
           <div className="block-head">
-            <h2>也许你也想看</h2>
+            <div className="block-title">
+              <h2>猜你喜欢</h2>
+              <p>懂你的喜好，推荐你的精彩</p>
+            </div>
           </div>
           <div className="poster-grid">
             {relatedVideos(item.id).map((video) => (

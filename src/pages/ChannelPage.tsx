@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { channelFacets, channelName, listByChannel, queryChannel } from '../lib/api'
+import { CHANNELS } from '../lib/catalog'
 import { useCatalog } from '../lib/source'
 import type { ChannelId, SortKey } from '../lib/types'
 import { PosterCard } from '../components/PosterCard'
@@ -36,7 +37,7 @@ export function ChannelPage({ channel }: Props) {
   if (!ready || (loading && !listByChannel(channel).length)) {
     return (
       <div className="wrap">
-        <Pending text="这一栏还在轻轻赶来。" />
+        <Pending text="正在为你加载精彩内容…" />
       </div>
     )
   }
@@ -44,7 +45,10 @@ export function ChannelPage({ channel }: Props) {
   return (
     <div className="page">
       <div className="wrap">
-        <h1 className="page-title">{channelName(channel)}</h1>
+        <div className="page-head">
+          <h1 className="page-title">{channelName(channel)}</h1>
+          <p>{CHANNELS.find((entry) => entry.id === channel)?.desc}</p>
+        </div>
         <div className="filters">
           <FilterRow label="类型" value={genre} options={['全部', ...facets.genres]} onChange={setGenre} />
           <FilterRow label="地区" value={region} options={['全部', ...facets.regions]} onChange={setRegion} />
@@ -53,7 +57,7 @@ export function ChannelPage({ channel }: Props) {
         </div>
         <p className="result-count">共 {list.length} 部</p>
         {list.length === 0 ? (
-          <div className="empty">这里还安静着。换个条件，也许就有想看的故事。</div>
+          <div className="empty">暂时还没有内容，换个条件，发现更多精彩吧</div>
         ) : (
           <div className="poster-grid">
             {list.map((item) => (
