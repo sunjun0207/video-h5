@@ -121,6 +121,27 @@ function solveChallenge(html: string): string {
   return ''
 }
 
+/** 片库对这个页面回了 404。片子还在时也会这样，过一会儿再打开往往又好了。 */
+class NotFoundError extends Error {}
+
+/** 片库回 404 时，隔这么久再试一次。 */
+const MISS_RETRY_MS = [800, 1600]
+
+function pause(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(signal.reason)
+    const timer = window.setTimeout(resolve, ms)
+    signal?.addEventListener(
+      'abort',
+      () => {
+        window.clearTimeout(timer)
+        reject(signal.reason)
+      },
+      { once: true },
+    )
+  })
+}
+
 async function openPage(path: string, signal?: AbortSignal): Promise<Response> {
   try {
     return await fetch(vodUrl(path), { credentials: 'same-origin', signal })
@@ -140,12 +161,20 @@ function passChallenge(html: string, sentAt: number) {
 }
 
 async function fetchHtml(path: string, signal?: AbortSignal): Promise<string> {
-  for (let attempt = 0; attempt < 3; attempt += 1) {
+  let misses = 0
+  for (let attempt = 0; attempt < 3; ) {
     const sentAt = Date.now()
     const response = await openPage(path, signal)
     const html = await response.text()
     if (response.status === 850 || html.includes('cdndefend_js_cookie')) {
       passChallenge(html, sentAt)
+      attempt += 1
+      continue
+    }
+    if (response.status === 404) {
+      if (misses >= MISS_RETRY_MS.length) throw new NotFoundError('片库暂时找不到这部片子，过一会儿再试')
+      await pause(MISS_RETRY_MS[misses], signal)
+      misses += 1
       continue
     }
     if (response.status !== 200) throw new Error('片库暂时没有打开')
@@ -587,13 +616,14 @@ function raceLines(picked: PlayLine[]): Promise<ProbeEntry> {
     let settled = false
     let graceStarted = false
     let next = 0
+    let missing = false
     const finish = (entry: ProbeEntry | undefined) => {
       if (settled) return
       settled = true
       for (const timer of timers) window.clearTimeout(timer)
       for (const controller of controllers) controller.abort()
       if (entry) resolve(entry)
-      else reject(new Error('这一集没有可播放的线路'))
+      else reject(missing ? new NotFoundError('这一集片库暂时打不开，过一会儿再试') : new Error('这一集没有可播放的线路'))
     }
     const decide = (late: boolean) => {
       for (const result of results) {
@@ -612,7 +642,10 @@ function raceLines(picked: PlayLine[]): Promise<ProbeEntry> {
       const slow = window.setTimeout(launch, SLOW_LINE_MS)
       timers.push(slow)
       probeEntry(picked[index], controllers[index].signal, true)
-        .catch(() => null)
+        .catch((reason: unknown) => {
+          if (reason instanceof NotFoundError) missing = true
+          return null
+        })
         .then((found) => {
           window.clearTimeout(slow)
           results[index] = found?.playUrl ? found : null
@@ -652,7 +685,18 @@ function pickLines(list: PlayLine[]): PlayLine[] {
   return picked
 }
 
-/** only：用户点名的线路，不测速直接用，慢不慢由用户自己判断。只有一条线路时也不用测。 */
+/** 从这几条线路里挑一条能播的；只有一条或用户点名时不测速。 */
+async function pickPlayable(lines: PlayLine[], only: boolean): Promise<ProbeEntry> {
+  if (!only && lines.length > 1) return raceLines(lines)
+  const found = await probeEntry(lines[0], new AbortController().signal, false)
+  if (!found?.playUrl) throw new Error('这一集没有可播放的线路')
+  return found
+}
+
+/**
+ * only：用户点名的线路，不测速直接用，慢不慢由用户自己判断。
+ * 常用线路都播不了时，再试先前跳过的蓝光、超清等线路。
+ */
 export async function loadPlay(entries: PlayLine[], only = false): Promise<{ url: string; line: string }> {
   const list = entries.filter((entry) => PLAY_PATH.test(entry.playPath))
   if (!list.length) throw new Error('没有播放地址')
@@ -663,11 +707,21 @@ export async function loadPlay(entries: PlayLine[], only = false): Promise<{ url
   if (running) return running
   const task = (async () => {
     const picked = pickLines(list)
-    const best =
-      only || picked.length === 1
-        ? await probeEntry(picked[0], new AbortController().signal, false).catch(() => null)
-        : await raceLines(picked)
-    if (!best?.playUrl) throw new Error('这一集没有可播放的线路')
+    const skipped = list.filter((entry) => !picked.includes(entry)).slice(0, 6)
+    let best: ProbeEntry | null = null
+    let missing = false
+    for (const lines of [picked, skipped]) {
+      if (!lines.length) continue
+      best = await pickPlayable(lines, only).catch((reason: unknown) => {
+        if (reason instanceof NotFoundError) missing = true
+        return null
+      })
+      if (best) break
+    }
+    if (!best) {
+      if (!missing) throw new Error('这一集没有可播放的线路')
+      throw new Error(only ? '这条线路片库暂时打不开，换一条试试' : '这一集片库暂时打不开，过一会儿再试')
+    }
     if (best.mediaUrl && best.mediaText) void cleanAds(best.mediaText, best.mediaUrl)
     const value = {
       url: absolutePlayUrl(best.playUrl || best.mediaUrl || ''),
