@@ -49,7 +49,7 @@ export function HeroBanner({ items }: Props) {
         className="hero-stage"
         style={{
           backgroundImage: cover
-            ? `linear-gradient(180deg, rgba(14,8,28,.04) 0%, rgba(14,8,28,.42) 46%, rgba(14,8,28,.94) 100%), linear-gradient(115deg, rgba(139,92,246,.32), transparent 62%), url(${cover})`
+            ? `linear-gradient(180deg, rgba(0,0,0,0) 0%, rgba(0,0,0,.28) 45%, rgba(0,0,0,.8) 100%), url(${cover})`
             : `linear-gradient(115deg, ${current.tone[0]} 0%, ${current.tone[1]} 78%)`,
           backgroundSize: 'cover',
           backgroundPosition: 'center',

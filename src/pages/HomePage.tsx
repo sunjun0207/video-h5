@@ -31,9 +31,7 @@ export function HomePage({ onSearch }: Props) {
     <div className="page">
       <div className="wrap">
         <section className="intro-card">
-          <h1>
-            精彩好剧，<em>一眼心动</em>
-          </h1>
+          <h1>精彩好剧，一眼心动</h1>
           <p>热门短剧、精彩影视、潮流视频，每一次打开都有新发现。让精彩，马上发生。</p>
           <SearchBox value={keyword} onChange={setKeyword} onSubmit={() => onSearch(keyword)} />
         </section>
