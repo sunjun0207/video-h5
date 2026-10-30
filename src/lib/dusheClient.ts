@@ -39,12 +39,23 @@ const STEADY_RATIO = 1.05
 const PICK_GRACE_MS = 1500
 /** 同时测速的线路数，太多会互相抢带宽、测不准。 */
 const RACE_LANES = 3
+/** 一轮测速最长这么久。连上了却一直不回的线路不能拖住整轮：到点就从测完的里挑，一条都没有就试别的线路。 */
+const RACE_LIMIT_MS = 30_000
+/** 开播时连不上的线路，这么久之内不再挑。 */
+const DEAD_LINE_MS = 10 * 60 * 1000
+/** 片源失效时，片库给的是几秒长的“视频不存在”占位片，下得动也播得了。正片没有这么短。 */
+const MIN_EPISODE_SECONDS = 30
+
+/** 挑中的线路：播放地址、线路名，以及它在片库里的播放页。 */
+export type PlayChoice = { url: string; line: string; playPath: string }
 
 let solvedAt = 0
 let searchToken = readToken()
 let tokenWarming: Promise<unknown> | null = null
-const playCache = new Map<string, { at: number; value: { url: string; line: string } }>()
-const playLoads = new Map<string, Promise<{ url: string; line: string }>>()
+const playCache = new Map<string, { at: number; value: PlayChoice }>()
+const playLoads = new Map<string, Promise<PlayChoice>>()
+/** 开播时连不上的线路（按播放页记）和片源地址。不同线路常给同一个地址，那些线路也一样播不了。 */
+const deadLines = new Map<string, number>()
 
 function readToken(): { value: string; at: number } {
   try {
@@ -121,11 +132,11 @@ function solveChallenge(html: string): string {
   return ''
 }
 
-/** 片库对这个页面回了 404。片子还在时也会这样，过一会儿再打开往往又好了。 */
-class NotFoundError extends Error {}
+/** 片库对这个页面回了 404 或 5xx。片子还在时也会这样，过一会儿再打开往往又好了。 */
+class UnavailableError extends Error {}
 
-/** 片库回 404 时，隔这么久再试一次。 */
-const MISS_RETRY_MS = [800, 1600]
+/** 片库回 404 或 5xx 时，隔这么久再试一次。 */
+const RETRY_MS = [800, 1600]
 
 function pause(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -161,7 +172,7 @@ function passChallenge(html: string, sentAt: number) {
 }
 
 async function fetchHtml(path: string, signal?: AbortSignal): Promise<string> {
-  let misses = 0
+  let retries = 0
   for (let attempt = 0; attempt < 3; ) {
     const sentAt = Date.now()
     const response = await openPage(path, signal)
@@ -171,10 +182,10 @@ async function fetchHtml(path: string, signal?: AbortSignal): Promise<string> {
       attempt += 1
       continue
     }
-    if (response.status === 404) {
-      if (misses >= MISS_RETRY_MS.length) throw new NotFoundError('片库暂时找不到这部片子，过一会儿再试')
-      await pause(MISS_RETRY_MS[misses], signal)
-      misses += 1
+    if (response.status === 404 || (response.status >= 500 && response.status < 600)) {
+      if (retries >= RETRY_MS.length) throw new UnavailableError('片库暂时打不开，过一会儿再试')
+      await pause(RETRY_MS[retries], signal)
+      retries += 1
       continue
     }
     if (response.status !== 200) throw new Error('片库暂时没有打开')
@@ -515,8 +526,8 @@ async function readLimited(url: string, signal: AbortSignal): Promise<Sample> {
 /** ratio 为 0 表示没测出速度（没测或分片超时），只在别的线路都不行时才用。 */
 type ProbeEntry = PlayLine & { mediaUrl?: string; mediaText?: string; playUrl?: string; ratio?: number; bitrate?: number }
 
-/** 解析出这条线路的播放列表；measure 为真时再拉一个分片测速。 */
-async function probeEntry(entry: PlayLine, signal: AbortSignal, measure: boolean): Promise<ProbeEntry | null> {
+/** 解析出这条线路的播放列表；measure 为真时再拉一个分片测速。only：用户点名的线路，给出的地址刚播不了也照样用。 */
+async function probeEntry(entry: PlayLine, signal: AbortSignal, measure: boolean, only = false): Promise<ProbeEntry | null> {
   const html = await fetchHtml(entry.playPath, signal)
   const master = parsePlay(html)
   const playlist = await readPlaylist(master, signal)
@@ -533,6 +544,10 @@ async function probeEntry(entry: PlayLine, signal: AbortSignal, measure: boolean
   }
   const sample = segments[Math.min(6, Math.max(segments.length - 1, 0))]
   if (!sample) return null
+  // 带结束标记、加起来又不到正片的长度，就是占位片。没有结束标记的直播不算。
+  const total = segments.reduce((sum, segment) => sum + segment.duration, 0)
+  if (media.text.includes('#EXT-X-ENDLIST') && total < MIN_EPISODE_SECONDS) return null
+  if (!only && isDead(media.url)) return null
   seedPlaylist(media.url, media.text)
   const found = { ...entry, mediaUrl: media.url, mediaText: media.text, playUrl: absolutePlayUrl(media.url), ratio: 0, bitrate: 0 }
   if (!measure) return found
@@ -616,14 +631,14 @@ function raceLines(picked: PlayLine[]): Promise<ProbeEntry> {
     let settled = false
     let graceStarted = false
     let next = 0
-    let missing = false
+    let unavailable = false
     const finish = (entry: ProbeEntry | undefined) => {
       if (settled) return
       settled = true
       for (const timer of timers) window.clearTimeout(timer)
       for (const controller of controllers) controller.abort()
       if (entry) resolve(entry)
-      else reject(missing ? new NotFoundError('这一集片库暂时打不开，过一会儿再试') : new Error('这一集没有可播放的线路'))
+      else reject(unavailable ? new UnavailableError('这一集片库暂时打不开，过一会儿再试') : new Error('这一集没有可播放的线路'))
     }
     const decide = (late: boolean) => {
       for (const result of results) {
@@ -643,7 +658,7 @@ function raceLines(picked: PlayLine[]): Promise<ProbeEntry> {
       timers.push(slow)
       probeEntry(picked[index], controllers[index].signal, true)
         .catch((reason: unknown) => {
-          if (reason instanceof NotFoundError) missing = true
+          if (reason instanceof UnavailableError) unavailable = true
           return null
         })
         .then((found) => {
@@ -659,6 +674,12 @@ function raceLines(picked: PlayLine[]): Promise<ProbeEntry> {
         })
     }
     for (let lane = 0; lane < Math.min(RACE_LANES, picked.length); lane += 1) launch()
+    timers.push(
+      window.setTimeout(() => {
+        const pool = results.filter((result): result is ProbeEntry => Boolean(result?.ratio))
+        finish(pool.length ? bestOf(pool) : results.find((result): result is ProbeEntry => Boolean(result)))
+      }, RACE_LIMIT_MS),
+    )
   })
 }
 
@@ -688,7 +709,7 @@ function pickLines(list: PlayLine[]): PlayLine[] {
 /** 从这几条线路里挑一条能播的；只有一条或用户点名时不测速。 */
 async function pickPlayable(lines: PlayLine[], only: boolean): Promise<ProbeEntry> {
   if (!only && lines.length > 1) return raceLines(lines)
-  const found = await probeEntry(lines[0], new AbortController().signal, false)
+  const found = await probeEntry(lines[0], new AbortController().signal, false, only)
   if (!found?.playUrl) throw new Error('这一集没有可播放的线路')
   return found
 }
@@ -697,9 +718,11 @@ async function pickPlayable(lines: PlayLine[], only: boolean): Promise<ProbeEntr
  * only：用户点名的线路，不测速直接用，慢不慢由用户自己判断。
  * 常用线路都播不了时，再试先前跳过的蓝光、超清等线路。
  */
-export async function loadPlay(entries: PlayLine[], only = false): Promise<{ url: string; line: string }> {
-  const list = entries.filter((entry) => PLAY_PATH.test(entry.playPath))
-  if (!list.length) throw new Error('没有播放地址')
+export async function loadPlay(entries: PlayLine[], only = false): Promise<PlayChoice> {
+  const valid = entries.filter((entry) => PLAY_PATH.test(entry.playPath))
+  if (!valid.length) throw new Error('没有播放地址')
+  const alive = only ? valid : valid.filter((entry) => !isDead(entry.playPath))
+  const list = alive.length ? alive : valid
   const key = `${only ? '1' : '0'}:${list.map((entry) => entry.playPath).join('|')}`
   const cached = playCache.get(key)
   if (cached && Date.now() - cached.at < 5 * 60 * 1000) return cached.value
@@ -709,27 +732,42 @@ export async function loadPlay(entries: PlayLine[], only = false): Promise<{ url
     const picked = pickLines(list)
     const skipped = list.filter((entry) => !picked.includes(entry)).slice(0, 6)
     let best: ProbeEntry | null = null
-    let missing = false
+    let unavailable = false
     for (const lines of [picked, skipped]) {
       if (!lines.length) continue
       best = await pickPlayable(lines, only).catch((reason: unknown) => {
-        if (reason instanceof NotFoundError) missing = true
+        if (reason instanceof UnavailableError) unavailable = true
         return null
       })
       if (best) break
     }
     if (!best) {
-      if (!missing) throw new Error('这一集没有可播放的线路')
+      if (!unavailable) throw new Error('这一集没有可播放的线路')
       throw new Error(only ? '这条线路片库暂时打不开，换一条试试' : '这一集片库暂时打不开，过一会儿再试')
     }
     if (best.mediaUrl && best.mediaText) void cleanAds(best.mediaText, best.mediaUrl)
     const value = {
       url: absolutePlayUrl(best.playUrl || best.mediaUrl || ''),
       line: [best.label, best.note].filter(Boolean).join(' · '),
+      playPath: best.playPath,
     }
     playCache.set(key, { at: Date.now(), value })
     return value
   })().finally(() => playLoads.delete(key))
   playLoads.set(key, task)
   return task
+}
+
+function isDead(key: string): boolean {
+  return Date.now() - (deadLines.get(key) || 0) < DEAD_LINE_MS
+}
+
+/** 挑中的线路开播时连不上：忘掉记住的地址，一阵子内不再挑它，也不挑给出同一个地址 url 的线路。 */
+export function dropLine(playPath: string, url: string) {
+  const now = Date.now()
+  deadLines.set(playPath, now)
+  deadLines.set(upstreamFromPlay(url) || url, now)
+  for (const [key, cached] of playCache) {
+    if (cached.value.playPath === playPath || cached.value.url === url) playCache.delete(key)
+  }
 }

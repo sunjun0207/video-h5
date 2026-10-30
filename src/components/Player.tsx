@@ -10,6 +10,8 @@ import type { Episode } from '../lib/types'
 const PREFETCH_AHEAD = 3
 /** 缓冲不到这么多秒时只多拉一个，带宽先给眼下要用的分片。 */
 const PREFETCH_DEEP_AT = 10
+/** 开播这么久还一点画面都没缓冲上，就当这条线路连不上。探线路时它刚下得动，正常的线路用不了这么久。 */
+const START_LIMIT = 20_000
 
 type Props = {
   episode: Episode
@@ -17,6 +19,8 @@ type Props = {
   loadError?: string
   onTime: (time: number) => void
   onEnded: () => void
+  /** 这条线路开不了播时调用。返回 true 表示页面去换线路，播放器就不再报错。 */
+  onStartFail?: () => boolean
 }
 
 function formatTime(value: number): string {
@@ -27,7 +31,7 @@ function formatTime(value: number): string {
   return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
 }
 
-export function Player({ episode, resumeAt, loadError = '', onTime, onEnded }: Props) {
+export function Player({ episode, resumeAt, loadError = '', onTime, onEnded, onStartFail }: Props) {
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const stageRef = useRef<HTMLDivElement | null>(null)
   const resumed = useRef(false)
@@ -35,6 +39,9 @@ export function Player({ episode, resumeAt, loadError = '', onTime, onEnded }: P
   const endAtRef = useRef(0)
   const nativePlayback = useRef(false)
   const onEndedRef = useRef(onEnded)
+  const onStartFailRef = useRef(onStartFail)
+  /** 还没缓冲上画面时放弃这条线路，交给页面换。每个地址只放弃一次，返回页面换没换。 */
+  const giveUpRef = useRef<() => boolean>(() => false)
   const waitTimer = useRef(0)
   const [playing, setPlaying] = useState(false)
   const [current, setCurrent] = useState(0)
@@ -44,6 +51,7 @@ export function Player({ episode, resumeAt, loadError = '', onTime, onEnded }: P
   const [waiting, setWaiting] = useState(false)
   const [needTap, setNeedTap] = useState(false)
   onEndedRef.current = onEnded
+  onStartFailRef.current = onStartFail
 
   const finish = () => {
     if (endedRef.current) return
@@ -94,6 +102,13 @@ export function Player({ episode, resumeAt, loadError = '', onTime, onEnded }: P
     let hls: Hls | undefined
     let started = false
     let starting = false
+    let gaveUp = false
+    giveUpRef.current = () => {
+      if (gaveUp || video.buffered.length) return false
+      gaveUp = true
+      return onStartFailRef.current?.() ?? false
+    }
+    const startTimer = window.setTimeout(() => giveUpRef.current(), START_LIMIT)
     const attachedAt = Date.now()
     const bufferedAhead = () => {
       if (!video.buffered.length) return 0
@@ -286,6 +301,7 @@ export function Player({ episode, resumeAt, loadError = '', onTime, onEnded }: P
           return
         }
         if (!data.fatal || !hls) return
+        if (giveUpRef.current()) return
         if (data.type === Hls.ErrorTypes.NETWORK_ERROR && recovers < 3) {
           recovers += 1
           hls.startLoad()
@@ -311,6 +327,8 @@ export function Player({ episode, resumeAt, loadError = '', onTime, onEnded }: P
     return () => {
       live = false
       window.clearTimeout(waitTimer.current)
+      window.clearTimeout(startTimer)
+      giveUpRef.current = () => false
       video.removeEventListener('canplay', onCanPlay)
       video.removeEventListener('progress', onCanPlay)
       hls?.destroy()
@@ -376,7 +394,8 @@ export function Player({ episode, resumeAt, loadError = '', onTime, onEnded }: P
           const video = event.currentTarget
           const time = video.currentTime
           setCurrent(time)
-          onTime(time)
+          // 换线路拆掉旧画面时也会触发一次、位置归零。还没有画面就不记进度，免得冲掉续播位置。
+          if (video.readyState > 0) onTime(time)
           const endAt = endAtRef.current
           if (endAt > 8 && time >= endAt - 0.35) finish()
         }}
@@ -392,7 +411,7 @@ export function Player({ episode, resumeAt, loadError = '', onTime, onEnded }: P
         }}
         onEnded={finish}
         onError={() => {
-          if (episode.url) {
+          if (episode.url && !giveUpRef.current()) {
             setError('画面没有回应。换一段，或稍后再来。')
             setBooting(false)
           }

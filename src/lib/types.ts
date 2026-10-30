@@ -12,6 +12,8 @@ export type Episode = {
   url: string
   playPath?: string
   line?: string
+  /** url 是从哪条线路的播放页挑出来的。 */
+  linePath?: string
   lines?: PlayLine[]
 }
 

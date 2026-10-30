@@ -10,13 +10,15 @@ import {
   type DownloadControl,
   type DownloadProgress,
 } from '../lib/download'
-import { ensurePlayUrl, useVideos } from '../lib/source'
+import { dropPlayLine, ensurePlayUrl, useVideos } from '../lib/source'
 import { historyOf, rememberPlay } from '../lib/storage'
 import { Player } from '../components/Player'
 import { PosterCard } from '../components/PosterCard'
 import { Pending } from '../components/Pending'
 
 const emptyStat: DownloadProgress = { received: 0, total: 0, speed: 0, ratio: 0 }
+/** 自动挑的线路开不了播时，一集最多自动换这么多次。 */
+const MAX_SWITCH = 2
 
 function formatSize(bytes: number): string {
   const value = Math.max(0, Number.isFinite(bytes) ? bytes : 0)
@@ -68,7 +70,9 @@ type Props = {
 export function PlayPage({ id, ep, onLibraryChange }: Props) {
   useVideos()
   const item = getVideo(id)
-  const [stream, setStream] = useState({ key: '', url: '', line: '' })
+  const [stream, setStream] = useState({ key: '', url: '', line: '', path: '' })
+  /** 这一集开播时连不上、已经自动换掉的线路。 */
+  const [dropped, setDropped] = useState<{ key: string; paths: string[] }>({ key: '', paths: [] })
   const [error, setError] = useState('')
   const [pick, setPick] = useState<{ id: string; ep: number; path: string } | null>(null)
   const [saveStat, setSaveStat] = useState<DownloadProgress>(emptyStat)
@@ -83,22 +87,25 @@ export function PlayPage({ id, ep, onLibraryChange }: Props) {
   const episode = item?.episodes[index]
   const forced = pick && pick.id === id && pick.ep === index ? pick.path : ''
   const streamKey = `${id}:${index}:${forced}`
+  const skipped = dropped.key === streamKey ? dropped.paths : []
+  const skipKey = skipped.join('|')
   /** 只在换集、换线路时读一次续播位置。播放中每 1.5 秒会写回进度，每次渲染都重读会让播放器反复重建。 */
   const resumeAt = useMemo(() => {
     const history = historyOf(id)
     return history && history.ep === index ? history.time : 0
   }, [id, index, streamKey])
   /** 换线路时先不放旧线路的地址，免得新线路还没选好时旧线路又拉起来抢带宽。 */
-  const known = forced ? undefined : episode
+  const known = forced || skipped.length ? undefined : episode
   const playUrl = error ? '' : stream.key === streamKey ? stream.url : known?.url || ''
   const lineName = stream.key === streamKey ? stream.line : known?.line || ''
+  const linePath = stream.key === streamKey ? stream.path : known?.linePath || ''
 
   useEffect(() => {
     let live = true
     setError('')
-    ensurePlayUrl(id, index, forced)
+    ensurePlayUrl(id, index, forced, skipKey ? skipKey.split('|') : [])
       .then((result) => {
-        if (live) setStream({ key: streamKey, url: result.url, line: result.line })
+        if (live) setStream({ key: streamKey, url: result.url, line: result.line, path: result.playPath })
       })
       .catch((reason: unknown) => {
         if (live) setError(reason instanceof Error ? reason.message : '这一段还没到来')
@@ -106,7 +113,7 @@ export function PlayPage({ id, ep, onLibraryChange }: Props) {
     return () => {
       live = false
     }
-  }, [id, index, forced, streamKey])
+  }, [id, index, forced, streamKey, skipKey])
 
   const itemId = item?.id
   useEffect(() => {
@@ -197,6 +204,15 @@ export function PlayPage({ id, ep, onLibraryChange }: Props) {
     }
   }
 
+  /** 自动挑的线路开不了播，就记下它、另挑一条。用户点名的线路不换。 */
+  const switchLine = () => {
+    if (forced || !linePath || skipped.length >= MAX_SWITCH) return false
+    dropPlayLine(id, index, linePath, playUrl)
+    setDropped({ key: streamKey, paths: [...skipped, linePath] })
+    setStream({ key: streamKey, url: '', line: '', path: '' })
+    return true
+  }
+
   return (
     <div className="play-page">
       <div className="wrap play-layout">
@@ -207,6 +223,7 @@ export function PlayPage({ id, ep, onLibraryChange }: Props) {
             resumeAt={playUrl ? resumeAt : 0}
             loadError={error}
             onTime={remember}
+            onStartFail={switchLine}
             onEnded={() => {
               if (index < item.episodes.length - 1) {
                 window.location.hash = href({ name: 'play', id: item.id, ep: index + 1 })

@@ -10,7 +10,7 @@ import {
   videoCount,
   videosVersion,
 } from './api'
-import { loadDetail, loadHome, loadPlay, loadSearch } from './dusheClient'
+import { dropLine, loadDetail, loadHome, loadPlay, loadSearch, type PlayChoice } from './dusheClient'
 import type { VideoItem } from './types'
 
 export { warmSearchToken } from './dusheClient'
@@ -101,6 +101,7 @@ function fetchDetail(id: string): Promise<VideoItem> {
           if (!prev?.url) continue
           episode.url = prev.url
           episode.line = prev.line
+          episode.linePath = prev.linePath
         }
       }
       item.loadedAt = Date.now()
@@ -128,7 +129,8 @@ export function warmDetail(id: string): void {
   void fetchDetail(id).catch(() => undefined)
 }
 
-export async function ensurePlayUrl(id: string, ep: number, onlyPath = ''): Promise<{ url: string; line: string }> {
+/** skip：开播时连不上、这次不再挑的线路。 */
+export async function ensurePlayUrl(id: string, ep: number, onlyPath = '', skip: string[] = []): Promise<PlayChoice> {
   const item = await ensureDetail(id)
   const episode = item.episodes[ep]
   if (!episode) throw new Error('没有这一集')
@@ -136,14 +138,30 @@ export async function ensurePlayUrl(id: string, ep: number, onlyPath = ''): Prom
     ? episode.lines
     : [{ label: episode.title, note: '', playPath: episode.playPath || '' }]
   ).filter((line) => line.playPath)
-  const selected = onlyPath ? lines.filter((line) => line.playPath === onlyPath) : lines
+  const selected = onlyPath
+    ? lines.filter((line) => line.playPath === onlyPath)
+    : lines.filter((line) => !skip.includes(line.playPath))
   const use = selected.length ? selected : lines
   if (!use.length) throw new Error('没有播放地址')
-  if (!onlyPath && episode.url) return { url: episode.url, line: episode.line || '' }
+  if (!onlyPath && episode.url && !skip.includes(episode.linePath || '')) {
+    return { url: episode.url, line: episode.line || '', playPath: episode.linePath || '' }
+  }
   const data = await loadPlay(use, Boolean(onlyPath))
   episode.url = data.url
-  episode.line = data.line || ''
-  return { url: data.url, line: episode.line }
+  episode.line = data.line
+  episode.linePath = data.playPath
+  return data
+}
+
+/** 这一集挑中的线路开播时连不上：忘掉记住的地址，下次不再先挑它，也不挑给出同一个地址 url 的线路。 */
+export function dropPlayLine(id: string, ep: number, playPath: string, url: string): void {
+  const episode = getVideo(id)?.episodes[ep]
+  if (episode && (episode.linePath === playPath || episode.url === url)) {
+    episode.url = ''
+    episode.line = ''
+    episode.linePath = ''
+  }
+  dropLine(playPath, url)
 }
 
 /** 联想和搜索页共用结果：输入时已经搜过的词，回车后直接出结果。 */
