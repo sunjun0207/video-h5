@@ -24,6 +24,7 @@ function readRoute(): Route {
 export default function App() {
   const [route, setRoute] = useState<Route>(readRoute)
   const [libraryVersion, setLibraryVersion] = useState(0)
+  const [searchActive, setSearchActive] = useState(false)
   const bump = useCallback(() => setLibraryVersion((value) => value + 1), [])
 
   useEffect(() => {
@@ -48,6 +49,30 @@ export default function App() {
     document.title = route.name === 'home' ? `${BRAND} - ${SLOGAN}` : `${pageTitle(route)} - ${BRAND}`
   }, [route])
 
+  useEffect(() => {
+    setSearchActive(false)
+  }, [route])
+
+  useEffect(() => {
+    if (!searchActive) {
+      document.documentElement.style.removeProperty('--vvh')
+      return
+    }
+    const viewport = window.visualViewport
+    if (!viewport) return
+    const sync = () => {
+      document.documentElement.style.setProperty('--vvh', `${Math.round(viewport.height)}px`)
+    }
+    sync()
+    viewport.addEventListener('resize', sync)
+    viewport.addEventListener('scroll', sync)
+    return () => {
+      viewport.removeEventListener('resize', sync)
+      viewport.removeEventListener('scroll', sync)
+      document.documentElement.style.removeProperty('--vvh')
+    }
+  }, [searchActive])
+
   const onSearch = (keyword: string) => {
     const text = keyword.trim()
     if (text) addSearchHistory(text)
@@ -58,14 +83,20 @@ export default function App() {
   const playing = route.name === 'play'
 
   return (
-    <div className={playing ? 'app playing' : 'app'}>
+    <div className={playing ? 'app playing' : searchActive ? 'app searching' : 'app'}>
       <Header />
       {playing ? null : <ChannelNav route={route} />}
       <main>
-        {route.name === 'home' ? <HomePage onSearch={onSearch} /> : null}
+        {route.name === 'home' ? <HomePage onSearch={onSearch} onSearchActive={setSearchActive} /> : null}
         {route.name === 'channel' ? <ChannelPage channel={route.channel} /> : null}
         {route.name === 'search' ? (
-          <SearchPage keyword={route.q} libraryVersion={libraryVersion} onLibraryChange={bump} onSearch={onSearch} />
+          <SearchPage
+            keyword={route.q}
+            libraryVersion={libraryVersion}
+            onLibraryChange={bump}
+            onSearch={onSearch}
+            onSearchActive={setSearchActive}
+          />
         ) : null}
         {route.name === 'detail' ? (
           <DetailPage id={route.id} libraryVersion={libraryVersion} onLibraryChange={bump} />

@@ -4,16 +4,18 @@ import { channelName } from '../lib/api'
 
 type Props = {
   items: VideoItem[]
+  title?: string
+  desc?: string
 }
 
-export function RankList({ items }: Props) {
+export function RankList({ items, title = '热门推荐', desc = '大家都在看，精彩不容错过' }: Props) {
   if (!items.length) return null
   return (
     <aside className="rank">
       <div className="rank-head">
         <div className="block-title">
-          <h2>热门推荐</h2>
-          <p>大家都在看，精彩不容错过</p>
+          <h2>{title}</h2>
+          <p>{desc}</p>
         </div>
         <span className="rank-tag">HOT</span>
       </div>

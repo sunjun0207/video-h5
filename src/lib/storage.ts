@@ -20,6 +20,17 @@ function writeJson(key: string, value: unknown) {
   localStorage.setItem(key, JSON.stringify(value))
 }
 
+const SEARCH_HISTORY_EVENT = 'video-h5-search-history'
+
+function notifySearchHistory() {
+  window.dispatchEvent(new Event(SEARCH_HISTORY_EVENT))
+}
+
+export function subscribeSearchHistory(listener: () => void): () => void {
+  window.addEventListener(SEARCH_HISTORY_EVENT, listener)
+  return () => window.removeEventListener(SEARCH_HISTORY_EVENT, listener)
+}
+
 export function getSearchHistory(): string[] {
   return readJson<string[]>(KEYS.searchHistory, [])
 }
@@ -30,6 +41,7 @@ export function addSearchHistory(keyword: string) {
   const list = getSearchHistory().filter((item) => item !== text)
   list.unshift(text)
   writeJson(KEYS.searchHistory, list.slice(0, 12))
+  notifySearchHistory()
 }
 
 export function removeSearchHistory(keyword: string) {
@@ -37,10 +49,12 @@ export function removeSearchHistory(keyword: string) {
     KEYS.searchHistory,
     getSearchHistory().filter((item) => item !== keyword),
   )
+  notifySearchHistory()
 }
 
 export function clearSearchHistory() {
   writeJson(KEYS.searchHistory, [])
+  notifySearchHistory()
 }
 
 export function getFavorites(): string[] {

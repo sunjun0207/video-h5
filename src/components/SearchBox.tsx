@@ -1,8 +1,10 @@
 import { useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent } from 'react'
+import { createPortal } from 'react-dom'
 import { channelName, suggestVideos } from '../lib/api'
 import { href } from '../lib/router'
 import { Cover } from './Cover'
 import { searchRemote, warmSearchToken } from '../lib/source'
+import { addSearchHistory } from '../lib/storage'
 import type { VideoItem } from '../lib/types'
 
 /** 停止输入这么久再去片库联想；拼音还没选字时不搜。 */
@@ -11,12 +13,17 @@ const SUGGEST_DELAY_MS = 250
 type Props = {
   value: string
   onChange: (value: string) => void
-  onSubmit: () => void
+  onSubmit: (keyword: string) => void
+  /** 输入框聚焦时为 true。失焦晚一点再报，方便点历史和热搜。 */
+  onActiveChange?: (active: boolean) => void
+  /** 联想列表放进这个节点，跟搜索历史、热搜榜一起滚，不再盖住它们。 */
+  suggestHost?: HTMLElement | null
 }
 
-export function SearchBox({ value, onChange, onSubmit }: Props) {
+export function SearchBox({ value, onChange, onSubmit, onActiveChange, suggestHost }: Props) {
   const listId = useId()
   const boxRef = useRef<HTMLDivElement | null>(null)
+  const inputRef = useRef<HTMLInputElement | null>(null)
   const closeTimer = useRef(0)
   const [open, setOpen] = useState(false)
   const [items, setItems] = useState<VideoItem[]>([])
@@ -61,10 +68,21 @@ export function SearchBox({ value, onChange, onSubmit }: Props) {
     }
   }, [value, open, composing])
 
+  const typedText = () => (inputRef.current?.value ?? value).trim()
+
+  const remember = (keyword: string) => {
+    const text = keyword.trim()
+    if (text) addSearchHistory(text)
+  }
+
   const submit = (event: FormEvent) => {
     event.preventDefault()
+    const text = typedText()
     setOpen(false)
-    onSubmit()
+    onActiveChange?.(false)
+    if (text !== value) onChange(text)
+    remember(text)
+    onSubmit(text)
   }
 
   const onKey = (event: KeyboardEvent<HTMLInputElement>) => {
@@ -80,11 +98,52 @@ export function SearchBox({ value, onChange, onSubmit }: Props) {
     }
   }
 
+  const suggest = open && (items.length > 0 || pending) ? (
+    <ul className="suggest flow" id={listId} role="listbox" aria-busy={pending}>
+      {items.map((item, index) => (
+          <li key={item.id}>
+            <a
+              className={index === active ? 'on' : ''}
+              role="option"
+              aria-selected={index === active}
+              href={href({ name: 'detail', id: item.id })}
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => {
+                remember(typedText())
+                remember(item.title)
+              }}
+            >
+            <span className="suggest-art" style={{ background: `linear-gradient(160deg, ${item.tone[0]}, ${item.tone[1]})` }}>
+              {item.cover ? <Cover src={item.cover} /> : <i>{item.mark}</i>}
+            </span>
+            <span>
+              <strong>{item.title}</strong>
+              <small>
+                {[item.guessed ? '' : channelName(item.channel), item.year || '', item.actors[0] || ''].filter(Boolean).join(' · ')}
+              </small>
+            </span>
+          </a>
+        </li>
+      ))}
+      {pending ? (
+        <li className="suggest-pending">
+          <span className="pending-dots" aria-hidden>
+            <i />
+            <i />
+            <i />
+          </span>
+          正在联想…
+        </li>
+      ) : null}
+    </ul>
+  ) : null
+
   return (
     <div className="search-box" ref={boxRef}>
       <form className="search-pill" onSubmit={submit} role="search">
         <span aria-hidden>⌕</span>
         <input
+          ref={inputRef}
           value={value}
           onChange={(event) => {
             onChange(event.target.value)
@@ -95,10 +154,15 @@ export function SearchBox({ value, onChange, onSubmit }: Props) {
           onFocus={() => {
             window.clearTimeout(closeTimer.current)
             setOpen(true)
+            onActiveChange?.(true)
             warmSearchToken()
+            window.setTimeout(() => boxRef.current?.scrollIntoView({ block: 'start' }), 60)
           }}
           onBlur={() => {
-            closeTimer.current = window.setTimeout(() => setOpen(false), 180)
+            closeTimer.current = window.setTimeout(() => {
+              setOpen(false)
+              onActiveChange?.(false)
+            }, 200)
           }}
           onKeyDown={onKey}
           placeholder="搜一搜，发现更多精彩"
@@ -110,40 +174,7 @@ export function SearchBox({ value, onChange, onSubmit }: Props) {
         />
         <button type="submit">开始探索</button>
       </form>
-      {open && (items.length > 0 || pending) ? (
-        <ul className="suggest" id={listId} role="listbox" aria-busy={pending}>
-          {items.map((item, index) => (
-            <li key={item.id}>
-              <a
-                className={index === active ? 'on' : ''}
-                role="option"
-                aria-selected={index === active}
-                href={href({ name: 'detail', id: item.id })}
-              >
-                <span className="suggest-art" style={{ background: `linear-gradient(160deg, ${item.tone[0]}, ${item.tone[1]})` }}>
-                  {item.cover ? <Cover src={item.cover} /> : <i>{item.mark}</i>}
-                </span>
-                <span>
-                  <strong>{item.title}</strong>
-                  <small>
-                    {[item.guessed ? '' : channelName(item.channel), item.year || '', item.actors[0] || ''].filter(Boolean).join(' · ')}
-                  </small>
-                </span>
-              </a>
-            </li>
-          ))}
-          {pending ? (
-            <li className="suggest-pending">
-              <span className="pending-dots" aria-hidden>
-                <i />
-                <i />
-                <i />
-              </span>
-              正在联想…
-            </li>
-          ) : null}
-        </ul>
-      ) : null}
+      {suggestHost ? (suggest ? createPortal(suggest, suggestHost) : null) : suggest}
     </div>
   )
 }

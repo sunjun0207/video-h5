@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react'
 import { href } from '../lib/router'
 import { peekSearch, searchRemote } from '../lib/source'
-import { clearSearchHistory, clearSearchSpot, getSearchHistory, markSearchSpot, readSearchSpot, removeSearchHistory } from '../lib/storage'
+import { clearSearchSpot, markSearchSpot, readSearchSpot } from '../lib/storage'
 import type { VideoItem } from '../lib/types'
 import { PosterCard } from '../components/PosterCard'
 import { SearchBox } from '../components/SearchBox'
+import { SearchDiscover } from '../components/SearchDiscover'
 import { Pending } from '../components/Pending'
 
 type Props = {
@@ -12,9 +13,10 @@ type Props = {
   libraryVersion: number
   onLibraryChange: () => void
   onSearch: (keyword: string) => void
+  onSearchActive?: (active: boolean) => void
 }
 
-export function SearchPage({ keyword, libraryVersion, onLibraryChange, onSearch }: Props) {
+export function SearchPage({ keyword, libraryVersion, onLibraryChange, onSearch, onSearchActive }: Props) {
   const q = keyword.trim()
   const [draft, setDraft] = useState(q)
   const [list, setList] = useState<VideoItem[]>(() => peekSearch(q) ?? [])
@@ -22,12 +24,25 @@ export function SearchPage({ keyword, libraryVersion, onLibraryChange, onSearch 
   const [error, setError] = useState('')
   const [spotId, setSpotId] = useState('')
   const [loadedFor, setLoadedFor] = useState(() => (peekSearch(q) ? q : ''))
-  const history = getSearchHistory()
-  void libraryVersion
+  const [boxActive, setBoxActive] = useState(false)
+  const [suggestHost, setSuggestHost] = useState<HTMLDivElement | null>(null)
+  void onLibraryChange
 
   useEffect(() => {
     setDraft(q)
   }, [q])
+
+  useEffect(() => {
+    onSearchActive?.(boxActive)
+  }, [boxActive, onSearchActive])
+
+  useEffect(() => () => onSearchActive?.(false), [onSearchActive])
+
+  const runSearch = (keyword: string) => {
+    setBoxActive(false)
+    if (document.activeElement instanceof HTMLElement) document.activeElement.blur()
+    onSearch(keyword)
+  }
 
   useEffect(() => {
     if (!q) {
@@ -88,50 +103,22 @@ export function SearchPage({ keyword, libraryVersion, onLibraryChange, onSearch 
   return (
     <div className="page">
       <div className="wrap">
-        <h1 className="page-title">{q ? `「${q}」的精彩内容` : '搜一搜'}</h1>
-        <SearchBox value={draft} onChange={setDraft} onSubmit={() => onSearch(draft)} />
-        {!q ? (
-          <section className="history-block">
-            <div className="block-head">
-              <h2>最近搜过</h2>
-              {history.length ? (
-                <button
-                  type="button"
-                  className="text-btn"
-                  onClick={() => {
-                    clearSearchHistory()
-                    onLibraryChange()
-                  }}
-                >
-                  清空
-                </button>
-              ) : null}
-            </div>
-            {history.length === 0 ? (
-              <div className="empty">暂时还没有搜索记录，去发现更多精彩吧</div>
-            ) : (
-              <div className="chips">
-                {history.map((item) => (
-                  <span key={item} className="chip">
-                    <button type="button" onClick={() => onSearch(item)}>
-                      {item}
-                    </button>
-                    <button
-                      type="button"
-                      aria-label={`删除 ${item}`}
-                      onClick={() => {
-                        removeSearchHistory(item)
-                        onLibraryChange()
-                      }}
-                    >
-                      ×
-                    </button>
-                  </span>
-                ))}
-              </div>
-            )}
-          </section>
-        ) : pending ? (
+        {q && !boxActive ? <h1 className="page-title">「{q}」的精彩内容</h1> : null}
+        {!q && !boxActive ? <h1 className="page-title">搜一搜</h1> : null}
+        <SearchBox
+          value={draft}
+          onChange={setDraft}
+          onSubmit={(text) => runSearch(text)}
+          onActiveChange={setBoxActive}
+          suggestHost={suggestHost}
+        />
+        {!q || boxActive ? (
+          <div className="search-discover-scroll">
+            <div ref={setSuggestHost} />
+            {boxActive && draft.trim() ? null : <SearchDiscover revision={libraryVersion} onSearch={runSearch} />}
+          </div>
+        ) : null}
+        {!q || boxActive ? null : pending ? (
           <Pending text="正在为你加载精彩内容…" />
         ) : error ? (
           <div className="empty">{error}</div>
@@ -153,10 +140,12 @@ export function SearchPage({ keyword, libraryVersion, onLibraryChange, onSearch 
             </div>
           </>
         )}
-        <p className="search-hint">
-          没想好看什么？去<a href={href({ name: 'channel', channel: 'short' })}>短剧</a>、
-          <a href={href({ name: 'channel', channel: 'movie' })}>电影</a>里逛逛，发现更多精彩。
-        </p>
+        {boxActive ? null : (
+          <p className="search-hint">
+            没想好看什么？去<a href={href({ name: 'channel', channel: 'short' })}>短剧</a>、
+            <a href={href({ name: 'channel', channel: 'movie' })}>电影</a>里逛逛，发现更多精彩。
+          </p>
+        )}
       </div>
     </div>
   )

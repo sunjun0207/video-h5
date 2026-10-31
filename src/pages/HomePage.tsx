@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { BRAND, CHANNELS } from '../lib/catalog'
 import { homeLayout } from '../lib/api'
 import { href } from '../lib/router'
@@ -7,18 +7,34 @@ import { getHistory } from '../lib/storage'
 import { HeroBanner } from '../components/HeroBanner'
 import { RankList } from '../components/RankList'
 import { SearchBox } from '../components/SearchBox'
+import { SearchDiscover } from '../components/SearchDiscover'
 import { SectionRow } from '../components/SectionRow'
 import { Pending } from '../components/Pending'
 
 type Props = {
   onSearch: (keyword: string) => void
+  onSearchActive?: (active: boolean) => void
 }
 
-export function HomePage({ onSearch }: Props) {
+export function HomePage({ onSearch, onSearchActive }: Props) {
   const { ready, error } = useCatalog()
   const version = useVideos()
   const [keyword, setKeyword] = useState('')
+  const [boxActive, setBoxActive] = useState(false)
+  const [suggestHost, setSuggestHost] = useState<HTMLDivElement | null>(null)
   const layout = useMemo(() => homeLayout(getHistory().map((entry) => entry.id)), [version])
+
+  useEffect(() => {
+    onSearchActive?.(boxActive)
+  }, [boxActive, onSearchActive])
+
+  useEffect(() => () => onSearchActive?.(false), [onSearchActive])
+
+  const runSearch = (keyword: string) => {
+    setBoxActive(false)
+    if (document.activeElement instanceof HTMLElement) document.activeElement.blur()
+    onSearch(keyword)
+  }
   if (error) return <div className="wrap empty">{error}</div>
   if (!ready) {
     return (
@@ -30,17 +46,36 @@ export function HomePage({ onSearch }: Props) {
   return (
     <div className="page">
       <div className="wrap">
-        <section className="intro-card">
-          <h1>精彩好剧，一眼心动</h1>
-          <p>热门短剧、精彩影视、潮流视频，每一次打开都有新发现。让精彩，马上发生。</p>
-          <SearchBox value={keyword} onChange={setKeyword} onSubmit={() => onSearch(keyword)} />
+        <section className={boxActive ? 'intro-card compact' : 'intro-card'}>
+          {boxActive ? null : (
+            <>
+              <h1>精彩好剧，一眼心动</h1>
+              <p>热门短剧、精彩影视、潮流视频，每一次打开都有新发现。让精彩，马上发生。</p>
+            </>
+          )}
+          <SearchBox
+            value={keyword}
+            onChange={setKeyword}
+            onSubmit={(text) => runSearch(text)}
+            onActiveChange={setBoxActive}
+            suggestHost={suggestHost}
+          />
         </section>
+        {boxActive ? (
+          <div className="search-discover-scroll">
+            <div ref={setSuggestHost} />
+            {keyword.trim() ? null : <SearchDiscover revision={0} onSearch={runSearch} />}
+          </div>
+        ) : null}
       </div>
-      <div className="wrap home-top">
-        <HeroBanner items={layout.hero} />
-        <RankList items={layout.rank} />
-      </div>
-      <div className="wrap">
+      {boxActive ? null : (
+        <div className="wrap home-top">
+          <HeroBanner items={layout.hero} />
+          <RankList items={layout.rank} />
+        </div>
+      )}
+      {boxActive ? null : (
+        <div className="wrap">
         <SectionRow title="猜你喜欢" desc="懂你的喜好，推荐你的精彩" items={layout.picks} />
         <SectionRow title="最新上线" desc="新鲜内容，抢先一步发现" items={layout.fresh} />
         {layout.channels.map(({ channel, items }) => {
@@ -67,7 +102,8 @@ export function HomePage({ onSearch }: Props) {
           <p>好内容，值得被发现；好时光，值得被分享。打开 {BRAND}，探索更多精彩，让每一次观看都充满惊喜！</p>
           <strong>精彩不止，快乐不散场。</strong>
         </section>
-      </div>
+        </div>
+      )}
     </div>
   )
 }

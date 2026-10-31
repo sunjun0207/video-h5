@@ -12,6 +12,14 @@ const PREFETCH_AHEAD = 3
 const PREFETCH_DEEP_AT = 10
 /** 开播这么久还一点画面都没缓冲上，就当这条线路连不上。探线路时它刚下得动，正常的线路用不了这么久。 */
 const START_LIMIT = 20_000
+/** 播放中进度条、时间、音量和全屏这么久没人碰就收起来。 */
+const CHROME_MS = 3_000
+
+type FullscreenVideo = HTMLVideoElement & {
+  webkitEnterFullscreen?: () => void
+  webkitExitFullscreen?: () => void
+  webkitDisplayingFullscreen?: boolean
+}
 
 type Props = {
   episode: Episode
@@ -50,6 +58,15 @@ export function Player({ episode, resumeAt, loadError = '', onTime, onEnded, onS
   const [booting, setBooting] = useState(true)
   const [waiting, setWaiting] = useState(false)
   const [needTap, setNeedTap] = useState(false)
+  const [chromeOn, setChromeOn] = useState(true)
+  const [full, setFull] = useState(false)
+  const [volume, setVolume] = useState(1)
+  const [muted, setMuted] = useState(false)
+  const chromeTimer = useRef(0)
+  const holding = useRef(false)
+  const volumeRef = useRef(1)
+  const mutedRef = useRef(false)
+  const revealRef = useRef<() => void>(() => {})
   onEndedRef.current = onEnded
   onStartFailRef.current = onStartFail
 
@@ -337,6 +354,68 @@ export function Player({ episode, resumeAt, loadError = '', onTime, onEnded, onS
     }
   }, [episode.url, resumeAt])
 
+  const scheduleHide = () => {
+    window.clearTimeout(chromeTimer.current)
+    const video = videoRef.current
+    const live = video ? !video.paused && !video.ended : false
+    if (!live || holding.current) return
+    chromeTimer.current = window.setTimeout(() => {
+      if (!holding.current) setChromeOn(false)
+    }, CHROME_MS)
+  }
+
+  const reveal = () => {
+    setChromeOn(true)
+    scheduleHide()
+  }
+  revealRef.current = reveal
+
+  useEffect(() => {
+    window.clearTimeout(chromeTimer.current)
+    if (!playing) {
+      setChromeOn(true)
+      return
+    }
+    setChromeOn(true)
+    chromeTimer.current = window.setTimeout(() => {
+      if (!holding.current) setChromeOn(false)
+    }, CHROME_MS)
+    return () => window.clearTimeout(chromeTimer.current)
+  }, [playing])
+
+  useEffect(() => {
+    const video = videoRef.current
+    if (!video) return
+    const apply = () => {
+      video.volume = volumeRef.current
+      video.muted = mutedRef.current
+    }
+    apply()
+    video.addEventListener('loadedmetadata', apply)
+    return () => video.removeEventListener('loadedmetadata', apply)
+  }, [episode.url])
+
+  useEffect(() => {
+    const video = videoRef.current
+    const sync = () => {
+      const stage = stageRef.current
+      const doc = document as Document & { webkitFullscreenElement?: Element | null }
+      const native = Boolean(video && (video as FullscreenVideo).webkitDisplayingFullscreen)
+      setFull(document.fullscreenElement === stage || doc.webkitFullscreenElement === stage || native)
+      revealRef.current()
+    }
+    document.addEventListener('fullscreenchange', sync)
+    document.addEventListener('webkitfullscreenchange', sync)
+    video?.addEventListener('webkitbeginfullscreen', sync)
+    video?.addEventListener('webkitendfullscreen', sync)
+    return () => {
+      document.removeEventListener('fullscreenchange', sync)
+      document.removeEventListener('webkitfullscreenchange', sync)
+      video?.removeEventListener('webkitbeginfullscreen', sync)
+      video?.removeEventListener('webkitendfullscreen', sync)
+    }
+  }, [])
+
   const toggle = () => {
     const video = videoRef.current
     if (!video) return
@@ -355,18 +434,83 @@ export function Player({ episode, resumeAt, loadError = '', onTime, onEnded, onS
     onTime(value)
   }
 
+  const applyVolume = (value: number) => {
+    const video = videoRef.current
+    const next = Math.min(1, Math.max(0, value))
+    volumeRef.current = next
+    mutedRef.current = next === 0
+    if (video) {
+      video.volume = next
+      video.muted = next === 0
+    }
+    setVolume(next)
+    setMuted(next === 0)
+  }
+
+  const toggleMute = () => {
+    const video = videoRef.current
+    if (!video) return
+    if (video.muted || video.volume === 0) {
+      applyVolume(volumeRef.current > 0 ? volumeRef.current : 1)
+      return
+    }
+    mutedRef.current = true
+    video.muted = true
+    setMuted(true)
+  }
+
   const fullscreen = () => {
     const stage = stageRef.current
-    if (!stage) return
-    if (document.fullscreenElement) void document.exitFullscreen()
-    else void stage.requestFullscreen().catch(() => undefined)
+    const video = videoRef.current as FullscreenVideo | null
+    if (!stage || !video) return
+    const doc = document as Document & {
+      webkitFullscreenElement?: Element | null
+      webkitExitFullscreen?: () => void
+    }
+    const stageEl = stage as HTMLElement & { webkitRequestFullscreen?: () => void }
+    const active = document.fullscreenElement || doc.webkitFullscreenElement || video.webkitDisplayingFullscreen
+    if (active) {
+      if (document.fullscreenElement && document.exitFullscreen) void document.exitFullscreen()
+      else if (doc.webkitFullscreenElement) doc.webkitExitFullscreen?.()
+      if (video.webkitDisplayingFullscreen) video.webkitExitFullscreen?.()
+      return
+    }
+    const enterVideo = () => video.webkitEnterFullscreen?.()
+    if (stage.requestFullscreen) {
+      void stage.requestFullscreen().catch(() => enterVideo())
+      return
+    }
+    if (stageEl.webkitRequestFullscreen) {
+      stageEl.webkitRequestFullscreen()
+      return
+    }
+    enterVideo()
+  }
+
+  const onSurface = () => {
+    if (chromeOn) {
+      window.clearTimeout(chromeTimer.current)
+      setChromeOn(false)
+      return
+    }
+    reveal()
+  }
+
+  const holdChrome = (down: boolean) => {
+    holding.current = down
+    if (down) {
+      window.clearTimeout(chromeTimer.current)
+      setChromeOn(true)
+      return
+    }
+    scheduleHide()
   }
 
   const message = loadError || error
   const showPlay = !message && (needTap || (!booting && !waiting && !playing))
 
   return (
-    <div className="stage" ref={stageRef}>
+    <div className={`stage${full ? ' is-full' : ''}`} ref={stageRef} onClick={onSurface}>
       <video
         ref={videoRef}
         playsInline
@@ -416,7 +560,6 @@ export function Player({ episode, resumeAt, loadError = '', onTime, onEnded, onS
             setBooting(false)
           }
         }}
-        onClick={toggle}
       />
       {message ? <div className="stage-error">{message}</div> : null}
       {!message && (booting || waiting) && !needTap ? (
@@ -426,29 +569,104 @@ export function Player({ episode, resumeAt, loadError = '', onTime, onEnded, onS
         </div>
       ) : null}
       {showPlay ? (
-        <button type="button" className="stage-center" onClick={toggle} aria-label="播放">
+        <button
+          type="button"
+          className="stage-center"
+          onClick={(event) => {
+            event.stopPropagation()
+            toggle()
+          }}
+          aria-label="播放"
+        >
           ▶
         </button>
       ) : null}
-      <div className="controls">
-        <button type="button" onClick={toggle} aria-label={playing ? '暂停' : '播放'}>
-          {playing ? '❚❚' : '▶'}
-        </button>
-        <span className="time">{formatTime(current)}</span>
-        <input
-          type="range"
-          min={0}
-          max={duration || 0}
-          step={0.1}
-          value={Math.min(current, duration || 0)}
-          aria-label="进度"
-          onChange={(event) => seek(Number(event.target.value))}
-        />
-        <span className="time">{formatTime(duration)}</span>
-        <button type="button" onClick={fullscreen} aria-label="全屏">
-          全屏
-        </button>
+      <div
+        className={chromeOn ? 'controls' : 'controls is-hidden'}
+        aria-hidden={!chromeOn}
+        onClick={(event) => event.stopPropagation()}
+        onPointerDown={(event) => {
+          if (event.currentTarget.setPointerCapture) event.currentTarget.setPointerCapture(event.pointerId)
+          holdChrome(true)
+        }}
+        onPointerUp={() => holdChrome(false)}
+        onPointerCancel={() => holdChrome(false)}
+        onLostPointerCapture={() => holdChrome(false)}
+      >
+        <div className="controls-seek">
+          <span className="time">{formatTime(current)}</span>
+          <input
+            type="range"
+            min={0}
+            max={duration || 0}
+            step={0.1}
+            value={Math.min(current, duration || 0)}
+            aria-label="进度"
+            onChange={(event) => seek(Number(event.target.value))}
+          />
+          <span className="time">{formatTime(duration)}</span>
+        </div>
+        <div className="controls-tools">
+          <button type="button" className="icon-btn" onClick={toggle} aria-label={playing ? '暂停' : '播放'}>
+            {playing ? '❚❚' : '▶'}
+          </button>
+          <button type="button" className="icon-btn" onClick={toggleMute} aria-label={muted || volume === 0 ? '打开声音' : '静音'}>
+            <VolumeIcon level={muted ? 0 : volume} />
+          </button>
+          <input
+            className="volume"
+            type="range"
+            min={0}
+            max={1}
+            step={0.05}
+            value={muted ? 0 : volume}
+            aria-label="音量"
+            onChange={(event) => applyVolume(Number(event.target.value))}
+          />
+          <button type="button" className="fs-btn" onClick={fullscreen} aria-label={full ? '退出全屏' : '全屏'}>
+            {full ? <ExitFullscreenIcon /> : <FullscreenIcon />}
+            <span>{full ? '退出全屏' : '全屏'}</span>
+          </button>
+        </div>
       </div>
     </div>
+  )
+}
+
+function VolumeIcon({ level }: { level: number }) {
+  const full = level >= 0.99
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden>
+      <path d="M3.5 9.2h3.2L11 5.5v13L6.7 14.8H3.5V9.2Z" fill="currentColor" />
+      {level <= 0 ? (
+        <path d="M15.5 9.5 20 14M20 9.5l-4.5 4.5" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+      ) : (
+        <>
+          <path d="M13.6 10.2a2.4 2.4 0 0 1 0 3.6" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+          {level >= 0.34 ? (
+            <path d="M16 8.4a5 5 0 0 1 0 7.2" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+          ) : null}
+          {full ? (
+            <path d="M18.4 6.4a8 8 0 0 1 0 11.2" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+          ) : null}
+        </>
+      )}
+    </svg>
+  )
+}
+
+function FullscreenIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden>
+      <path d="M4 9V5h4M20 9V5h-4M4 15v4h4M20 15v4h-4" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+function ExitFullscreenIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden>
+      <path d="M9 4v4H5M15 4v4h4M9 20v-4H5M15 20v-4h4" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
   )
 }
