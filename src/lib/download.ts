@@ -1,5 +1,5 @@
 import { findAdGroups, type GroupHead } from './hlsAds'
-import { API_PREFIX, rewritePlaylist, upstreamFromPlay } from './mediaProxy'
+import { API_PREFIX, PLAY_RESOLVED_HEADER, resolvedPlayUrl, rewritePlaylist, upstreamFromPlay } from './mediaProxy'
 import { probeTs, type TsHead } from './mpegts'
 import { downloadLanes } from './playback'
 import { openRemux, type RemuxPipe } from './remuxPipe'
@@ -102,7 +102,10 @@ function mediaPlan(text: string): Plan {
 
 async function loadPlan(url: string, signal: AbortSignal): Promise<Plan> {
   const response = await pull(url, signal)
-  const upstream = upstreamFromPlay(response.url || url) || response.url || url
+  const upstream = resolvedPlayUrl(
+    upstreamFromPlay(response.url || url) || response.url || url,
+    response.headers.get(PLAY_RESOLVED_HEADER),
+  )
   const text = rewritePlaylist(await response.text(), upstream)
   if (!text.includes('#EXTM3U')) throw new Error('这一集暂时下载不了，换条线路试试')
   if (text.includes('#EXT-X-STREAM-INF')) {

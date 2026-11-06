@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { channelName, getVideo, relatedVideos } from '../lib/api'
-import { href } from '../lib/router'
+import { goPlay, href } from '../lib/router'
 import {
   createDownloadControl,
   downloadEpisode,
@@ -11,8 +11,10 @@ import {
   type DownloadProgress,
 } from '../lib/download'
 import { dropPlayLine, ensurePlayUrl, useVideos } from '../lib/source'
+import { publishNow } from '../lib/playbackSession'
 import { historyOf, rememberPlay } from '../lib/storage'
 import { Player } from '../components/Player'
+import { PlayQueueSheet } from '../components/PlayQueueSheet'
 import { PosterCard } from '../components/PosterCard'
 import { Pending } from '../components/Pending'
 
@@ -65,9 +67,13 @@ type Props = {
   id: string
   ep: number
   onLibraryChange: () => void
+  onBack: () => void
+  /** 已经返回上一页时播放器还在，只是画面藏到了底部小条里。 */
+  visible?: boolean
+  onKeepEp?: (ep: number) => void
 }
 
-export function PlayPage({ id, ep, onLibraryChange }: Props) {
+export function PlayPage({ id, ep, onLibraryChange, onBack, visible = true, onKeepEp }: Props) {
   useVideos()
   const item = getVideo(id)
   const [stream, setStream] = useState({ key: '', url: '', line: '', path: '' })
@@ -79,6 +85,13 @@ export function PlayPage({ id, ep, onLibraryChange }: Props) {
   const [savePhase, setSavePhase] = useState<'idle' | 'running' | 'paused'>('idle')
   const [saveNote, setSaveNote] = useState('')
   const [savedFile, setSavedFile] = useState('')
+  const [queueOpen, setQueueOpen] = useState(false)
+  useEffect(() => {
+    const open = () => setQueueOpen(true)
+    window.addEventListener('app-open-queue', open)
+    return () => window.removeEventListener('app-open-queue', open)
+  }, [])
+  useEffect(() => () => publishNow(null, true), [])
   const savedAt = useRef(0)
   const warmed = useRef('')
   const saveControl = useRef<DownloadControl | null>(null)
@@ -183,10 +196,39 @@ export function PlayPage({ id, ep, onLibraryChange }: Props) {
     })
   }
 
+  const report = useCallback(
+    (media: { playing: boolean; current: number; duration: number }) => {
+      if (!item || !episode) return
+      publishNow({
+        id: item.id,
+        ep: index,
+        title: item.title,
+        subtitle: episode.title,
+        cover: item.cover,
+        mark: item.mark,
+        tone: item.tone,
+        ...media,
+      })
+    },
+    [episode, index, item],
+  )
+
   if (!item || !episode) {
-    if (error) return <div className="wrap empty">{error}</div>
+    if (error) {
+      return (
+        <div className="wrap empty">
+          <button type="button" className="detail-back" aria-label="返回" onClick={onBack}>
+            <BackGlyph />
+          </button>
+          {error}
+        </div>
+      )
+    }
     return (
       <div className="wrap">
+        <button type="button" className="detail-back" aria-label="返回" onClick={onBack}>
+          <BackGlyph />
+        </button>
         <Pending text="正在为你加载精彩内容…" />
       </div>
     )
@@ -224,14 +266,21 @@ export function PlayPage({ id, ep, onLibraryChange }: Props) {
             loadError={error}
             onTime={remember}
             onStartFail={switchLine}
+            present={visible}
+            onMedia={report}
+            onBack={onBack}
+            onOpenQueue={() => setQueueOpen(true)}
             onEnded={() => {
-              if (index < item.episodes.length - 1) {
-                window.location.hash = href({ name: 'play', id: item.id, ep: index + 1 })
-              }
+              if (index >= item.episodes.length - 1) return
+              if (visible) goPlay(item.id, index + 1)
+              else onKeepEp?.(index + 1)
             }}
           />
           <div className="play-copy">
             <p className="crumb light">
+              <button type="button" className="detail-back" aria-label="返回" onClick={onBack}>
+                <BackGlyph />
+              </button>
               <a href={href({ name: 'home' })}>首页</a>
               {item.guessed ? null : (
                 <>
@@ -301,9 +350,9 @@ export function PlayPage({ id, ep, onLibraryChange }: Props) {
           </div>
           <div className="ep-grid dark">
             {item.episodes.map((entry, entryIndex) => (
-              <a key={entry.id} className={entryIndex === index ? 'on' : ''} href={href({ name: 'play', id: item.id, ep: entryIndex })}>
+              <button key={entry.id} type="button" className={entryIndex === index ? 'on' : ''} onClick={() => goPlay(item.id, entryIndex)}>
                 {entry.title}
-              </a>
+              </button>
             ))}
           </div>
         </aside>
@@ -323,6 +372,24 @@ export function PlayPage({ id, ep, onLibraryChange }: Props) {
           </div>
         </section>
       </div>
+      <PlayQueueSheet
+        open={queueOpen}
+        videoId={item.id}
+        ep={index}
+        onClose={() => setQueueOpen(false)}
+        onPick={(nextId, nextEp) => {
+          setQueueOpen(false)
+          goPlay(nextId, nextEp)
+        }}
+      />
     </div>
+  )
+}
+
+function BackGlyph() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden>
+      <path d="M15 5 8 12l7 7" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
   )
 }

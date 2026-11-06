@@ -14,9 +14,10 @@ type Props = {
   id: string
   libraryVersion: number
   onLibraryChange: () => void
+  onBack: () => void
 }
 
-export function DetailPage({ id, libraryVersion, onLibraryChange }: Props) {
+export function DetailPage({ id, libraryVersion, onLibraryChange, onBack }: Props) {
   useVideos()
   const item = getVideo(id)
   const [error, setError] = useState('')
@@ -42,10 +43,22 @@ export function DetailPage({ id, libraryVersion, onLibraryChange }: Props) {
     return () => window.clearTimeout(timer)
   }, [id, hasEpisodes])
 
-  if (error) return <div className="wrap empty">{error}</div>
+  if (error) {
+    return (
+      <div className="wrap empty">
+        <button type="button" className="detail-back" aria-label="返回" onClick={onBack}>
+          <BackGlyph />
+        </button>
+        {error}
+      </div>
+    )
+  }
   if (!item) {
     return (
       <div className="wrap">
+        <button type="button" className="detail-back" aria-label="返回" onClick={onBack}>
+          <BackGlyph />
+        </button>
         <Pending text="正在为你加载精彩内容…" />
       </div>
     )
@@ -59,6 +72,11 @@ export function DetailPage({ id, libraryVersion, onLibraryChange }: Props) {
     <div className="page">
       <div className="wrap">
         <p className="crumb">
+          <button type="button" className="detail-back" aria-label="返回" onClick={onBack}>
+            <svg viewBox="0 0 24 24" aria-hidden>
+              <path d="M15 5 8 12l7 7" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </button>
           <a href={href({ name: 'home' })}>首页</a>
           <span>/</span>
           {item.guessed ? null : (
@@ -131,5 +149,13 @@ export function DetailPage({ id, libraryVersion, onLibraryChange }: Props) {
         </section>
       </div>
     </div>
+  )
+}
+
+function BackGlyph() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden>
+      <path d="M15 5 8 12l7 7" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
   )
 }

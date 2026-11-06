@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import Hls, { type XhrLoader } from 'hls.js'
 import { cleanAds } from '../lib/adScan'
-import { absolutePlayUrl, rewritePlaylist, takePlaylist, upstreamFromPlay, useProxy } from '../lib/mediaProxy'
+import { bindPlaybackControls } from '../lib/playbackSession'
+import { absolutePlayUrl, PLAY_RESOLVED_HEADER, resolvedPlayUrl, rewritePlaylist, takePlaylist, upstreamFromPlay, useProxy } from '../lib/mediaProxy'
 import { reportPlayback } from '../lib/playback'
 import { createPrefetcher } from '../lib/prefetch'
 import type { Episode } from '../lib/types'
@@ -21,6 +22,18 @@ type FullscreenVideo = HTMLVideoElement & {
   webkitDisplayingFullscreen?: boolean
 }
 
+type VideoOrientation = {
+  lockLandscape: () => void
+  unlock: () => void
+}
+
+/** 安装包里的全屏不会自己转横屏，由原生层锁方向。网页里没有这个接口。 */
+function orientationBridge(): VideoOrientation | null {
+  const bridge = (window as Window & { VideoOrientation?: VideoOrientation }).VideoOrientation
+  if (!bridge || typeof bridge.lockLandscape !== 'function' || typeof bridge.unlock !== 'function') return null
+  return bridge
+}
+
 type Props = {
   episode: Episode
   resumeAt: number
@@ -29,6 +42,11 @@ type Props = {
   onEnded: () => void
   /** 这条线路开不了播时调用。返回 true 表示页面去换线路，播放器就不再报错。 */
   onStartFail?: () => boolean
+  onBack?: () => void
+  onOpenQueue?: () => void
+  /** 离开播放页后播放器还留着，这时要退出全屏，画面交给底部小条。 */
+  present?: boolean
+  onMedia?: (state: { playing: boolean; current: number; duration: number }) => void
 }
 
 function formatTime(value: number): string {
@@ -39,7 +57,7 @@ function formatTime(value: number): string {
   return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
 }
 
-export function Player({ episode, resumeAt, loadError = '', onTime, onEnded, onStartFail }: Props) {
+export function Player({ episode, resumeAt, loadError = '', onTime, onEnded, onStartFail, onBack, onOpenQueue, present = true, onMedia }: Props) {
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const stageRef = useRef<HTMLDivElement | null>(null)
   const resumed = useRef(false)
@@ -60,6 +78,8 @@ export function Player({ episode, resumeAt, loadError = '', onTime, onEnded, onS
   const [needTap, setNeedTap] = useState(false)
   const [chromeOn, setChromeOn] = useState(true)
   const [full, setFull] = useState(false)
+  const [shell, setShell] = useState(false)
+  const shellRef = useRef(false)
   const [volume, setVolume] = useState(1)
   const [muted, setMuted] = useState(false)
   const chromeTimer = useRef(0)
@@ -67,6 +87,9 @@ export function Player({ episode, resumeAt, loadError = '', onTime, onEnded, onS
   const volumeRef = useRef(1)
   const mutedRef = useRef(false)
   const revealRef = useRef<() => void>(() => {})
+  const toggleRef = useRef<() => void>(() => {})
+  const onMediaRef = useRef(onMedia)
+  onMediaRef.current = onMedia
   onEndedRef.current = onEnded
   onStartFailRef.current = onStartFail
 
@@ -186,7 +209,9 @@ export function Player({ episode, resumeAt, loadError = '', onTime, onEnded, onS
               onSuccess(response, stats, ctx, networkDetails)
               return
             }
-            const finalUpstream = upstreamFromPlay(networkDetails?.responseURL || ctx.url) || upstream
+            const hinted = networkDetails?.getResponseHeader?.(PLAY_RESOLVED_HEADER)
+            const fromNetwork = networkDetails?.responseURL || ctx.url
+            const finalUpstream = resolvedPlayUrl(upstreamFromPlay(fromNetwork) || fromNetwork || upstream, hinted)
             let waiting = true
             this.release = () => {
               waiting = false
@@ -371,6 +396,30 @@ export function Player({ episode, resumeAt, loadError = '', onTime, onEnded, onS
   revealRef.current = reveal
 
   useEffect(() => {
+    onMediaRef.current?.({ playing, current, duration })
+  }, [playing, current, duration])
+
+  useEffect(() => {
+    bindPlaybackControls({
+      toggle: () => toggleRef.current(),
+      pause: () => videoRef.current?.pause(),
+    })
+    return () => bindPlaybackControls(null)
+  }, [])
+
+  useEffect(() => {
+    if (present) return
+    shellRef.current = false
+    setShell(false)
+    orientationBridge()?.unlock()
+    const video = videoRef.current as FullscreenVideo | null
+    const doc = document as Document & { webkitFullscreenElement?: Element | null; webkitExitFullscreen?: () => void }
+    if (video?.webkitDisplayingFullscreen) video.webkitExitFullscreen?.()
+    if (document.fullscreenElement && document.exitFullscreen) void document.exitFullscreen()
+    else if (doc.webkitFullscreenElement) doc.webkitExitFullscreen?.()
+  }, [present])
+
+  useEffect(() => {
     window.clearTimeout(chromeTimer.current)
     if (!playing) {
       setChromeOn(true)
@@ -404,15 +453,27 @@ export function Player({ episode, resumeAt, loadError = '', onTime, onEnded, onS
       setFull(document.fullscreenElement === stage || doc.webkitFullscreenElement === stage || native)
       revealRef.current()
     }
+    const onAppExit = () => {
+      shellRef.current = false
+      setShell(false)
+      const doc = document as Document & { webkitFullscreenElement?: Element | null; webkitExitFullscreen?: () => void }
+      const current = videoRef.current as FullscreenVideo | null
+      if (document.fullscreenElement && document.exitFullscreen) void document.exitFullscreen()
+      else if (doc.webkitFullscreenElement) doc.webkitExitFullscreen?.()
+      if (current?.webkitDisplayingFullscreen) current.webkitExitFullscreen?.()
+    }
     document.addEventListener('fullscreenchange', sync)
     document.addEventListener('webkitfullscreenchange', sync)
     video?.addEventListener('webkitbeginfullscreen', sync)
     video?.addEventListener('webkitendfullscreen', sync)
+    window.addEventListener('app-exit-fullscreen', onAppExit)
     return () => {
       document.removeEventListener('fullscreenchange', sync)
       document.removeEventListener('webkitfullscreenchange', sync)
       video?.removeEventListener('webkitbeginfullscreen', sync)
       video?.removeEventListener('webkitendfullscreen', sync)
+      window.removeEventListener('app-exit-fullscreen', onAppExit)
+      if (shellRef.current) orientationBridge()?.unlock()
     }
   }, [])
 
@@ -424,6 +485,7 @@ export function Player({ episode, resumeAt, loadError = '', onTime, onEnded, onS
       void video.play().catch(() => setError('播放遇到一点问题，换个方式再试试'))
     } else video.pause()
   }
+  toggleRef.current = toggle
 
   const seek = (value: number) => {
     const video = videoRef.current
@@ -459,21 +521,43 @@ export function Player({ episode, resumeAt, loadError = '', onTime, onEnded, onS
     setMuted(true)
   }
 
-  const fullscreen = () => {
-    const stage = stageRef.current
+  const exitDocumentFullscreen = () => {
     const video = videoRef.current as FullscreenVideo | null
-    if (!stage || !video) return
     const doc = document as Document & {
       webkitFullscreenElement?: Element | null
       webkitExitFullscreen?: () => void
     }
+    if (video?.webkitDisplayingFullscreen) video.webkitExitFullscreen?.()
+    if (document.fullscreenElement && document.exitFullscreen) {
+      void document.exitFullscreen()
+      return true
+    }
+    if (doc.webkitFullscreenElement) doc.webkitExitFullscreen?.()
+    return false
+  }
+
+  const exitShell = () => {
+    shellRef.current = false
+    setShell(false)
+    orientationBridge()?.unlock()
+  }
+
+  const fullscreen = () => {
+    const stage = stageRef.current
+    const video = videoRef.current as FullscreenVideo | null
+    if (!stage || !video) return
+    const doc = document as Document & { webkitFullscreenElement?: Element | null }
     const stageEl = stage as HTMLElement & { webkitRequestFullscreen?: () => void }
-    const active = document.fullscreenElement || doc.webkitFullscreenElement || video.webkitDisplayingFullscreen
+    const active = shellRef.current || document.fullscreenElement || doc.webkitFullscreenElement || video.webkitDisplayingFullscreen
     if (active) {
-      if (document.fullscreenElement && document.exitFullscreen) void document.exitFullscreen()
-      else if (doc.webkitFullscreenElement) doc.webkitExitFullscreen?.()
-      if (video.webkitDisplayingFullscreen) video.webkitExitFullscreen?.()
+      exitShell()
+      exitDocumentFullscreen()
       return
+    }
+    if (orientationBridge()) {
+      shellRef.current = true
+      setShell(true)
+      orientationBridge()?.lockLandscape()
     }
     const enterVideo = () => video.webkitEnterFullscreen?.()
     if (stage.requestFullscreen) {
@@ -485,6 +569,22 @@ export function Player({ episode, resumeAt, loadError = '', onTime, onEnded, onS
       return
     }
     enterVideo()
+  }
+
+  const openQueue = () => {
+    const video = videoRef.current as FullscreenVideo | null
+    const doc = document as Document & {
+      webkitFullscreenElement?: Element | null
+      webkitExitFullscreen?: () => void
+    }
+    exitShell()
+    if (video?.webkitDisplayingFullscreen) video.webkitExitFullscreen?.()
+    if (document.fullscreenElement && document.exitFullscreen) {
+      void document.exitFullscreen().finally(() => onOpenQueue?.())
+      return
+    }
+    if (doc.webkitFullscreenElement) doc.webkitExitFullscreen?.()
+    onOpenQueue?.()
   }
 
   const onSurface = () => {
@@ -510,7 +610,51 @@ export function Player({ episode, resumeAt, loadError = '', onTime, onEnded, onS
   const showPlay = !message && (needTap || (!booting && !waiting && !playing))
 
   return (
-    <div className={`stage${full ? ' is-full' : ''}`} ref={stageRef} onClick={onSurface}>
+    <div className={`stage${full ? ' is-full' : ''}${shell ? ' is-shell' : ''}`} ref={stageRef} onClick={onSurface}>
+      {onBack || onOpenQueue ? (
+        <div
+          className={chromeOn ? 'stage-top' : 'stage-top is-hidden'}
+          aria-hidden={!chromeOn}
+          onClick={(event) => event.stopPropagation()}
+          onPointerDown={(event) => {
+            if (event.currentTarget.setPointerCapture) event.currentTarget.setPointerCapture(event.pointerId)
+            holdChrome(true)
+          }}
+          onPointerUp={() => holdChrome(false)}
+          onPointerCancel={() => holdChrome(false)}
+          onLostPointerCapture={() => holdChrome(false)}
+        >
+          {onBack ? (
+            <button
+              type="button"
+              className="stage-back"
+              aria-label="返回"
+              onClick={(event) => {
+                event.stopPropagation()
+                onBack()
+              }}
+            >
+              <BackGlyph />
+            </button>
+          ) : (
+            <span />
+          )}
+          {onOpenQueue ? (
+            <button
+              type="button"
+              className="stage-list"
+              aria-label="播放列表"
+              onClick={(event) => {
+                event.stopPropagation()
+                openQueue()
+              }}
+            >
+              <ListGlyph />
+              <span>列表</span>
+            </button>
+          ) : null}
+        </div>
+      ) : null}
       <video
         ref={videoRef}
         playsInline
@@ -623,13 +767,30 @@ export function Player({ episode, resumeAt, loadError = '', onTime, onEnded, onS
             aria-label="音量"
             onChange={(event) => applyVolume(Number(event.target.value))}
           />
-          <button type="button" className="fs-btn" onClick={fullscreen} aria-label={full ? '退出全屏' : '全屏'}>
-            {full ? <ExitFullscreenIcon /> : <FullscreenIcon />}
-            <span>{full ? '退出全屏' : '全屏'}</span>
+          <button type="button" className="fs-btn" onClick={fullscreen} aria-label={full || shell ? '退出全屏' : '全屏'}>
+            {full || shell ? <ExitFullscreenIcon /> : <FullscreenIcon />}
+            <span>{full || shell ? '退出全屏' : '全屏'}</span>
           </button>
         </div>
       </div>
     </div>
+  )
+}
+
+function BackGlyph() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden>
+      <path d="M15 5 8 12l7 7" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+function ListGlyph() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden>
+      <path d="M8 7h11M8 12h11M8 17h11" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+      <path d="M4.5 7h.01M4.5 12h.01M4.5 17h.01" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" />
+    </svg>
   )
 }
 

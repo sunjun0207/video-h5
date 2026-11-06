@@ -87,7 +87,108 @@ public final class ApiProxy {
         if (target == null) return text(404, "Not Found", "unknown proxy path");
         if (target.blocked) return text(403, "Forbidden", "blocked host");
 
+        if (target.play) return executePlay(request, target, method);
         return execute(request, target, method, vodRequestCookie(request, target), true);
+    }
+
+    /**
+     * 不少片源的 m3u8 先 302 到另一台机器，列表里的分片又是相对地址。
+     * WebView 拿到 shouldInterceptRequest 返回的 302 经常不跟，分片就还去旧地址，播放和下载一起失败。
+     * 这里自己跟完跳转，再把列表里的地址写成最终那台机器上的绝对地址。
+     */
+    private static WebResourceResponse executePlay(WebResourceRequest request, Target target, String method) throws IOException {
+        Target current = target;
+        for (int hop = 0; hop < 5; hop += 1) {
+            HttpURLConnection conn = open(current, method, request, null);
+            try {
+                int code = conn.getResponseCode();
+                if (code >= 300 && code < 400) {
+                    String location = conn.getHeaderField("Location");
+                    conn.disconnect();
+                    Target next = redirectTarget(current, location);
+                    if (next == null) return text(502, "Bad Gateway", "bad redirect");
+                    if (next.blocked) return text(403, "Forbidden", "blocked host");
+                    Log.i(TAG, "play redirect " + current.host + ":" + current.port + " -> " + next.host + ":" + next.port);
+                    current = next;
+                    continue;
+                }
+                if (playlistBody(conn, current.url)) {
+                    byte[] body = absolutizePlaylist(readFully(streamOf(conn)), current.url);
+                    WebResourceResponse response = bytesResponse(conn, code, body, current);
+                    conn.disconnect();
+                    return response;
+                }
+                return streamResponse(conn, code, current);
+            } catch (IOException ex) {
+                conn.disconnect();
+                throw ex;
+            }
+        }
+        return text(502, "Bad Gateway", "too many redirects");
+    }
+
+    private static Target redirectTarget(Target current, String location) {
+        if (location == null || location.isEmpty()) return null;
+        try {
+            URL next = new URL(new URL(current.url), location);
+            String host = next.getHost();
+            if (host == null || host.isEmpty()) return null;
+            String scheme = next.getProtocol();
+            int port = next.getPort();
+            if (port < 0) port = "https".equalsIgnoreCase(scheme) ? 443 : 80;
+            if (blockedHost(host)) return Target.blocked();
+            return Target.play(next.toString(), scheme, host, port);
+        } catch (IOException ex) {
+            return null;
+        }
+    }
+
+    private static boolean playlistBody(HttpURLConnection conn, String url) {
+        String type = conn.getContentType();
+        if (type != null && type.toLowerCase(Locale.US).contains("mpegurl")) return true;
+        int query = url.indexOf('?');
+        String path = query >= 0 ? url.substring(0, query) : url;
+        return path.endsWith(".m3u8");
+    }
+
+    private static final Pattern URI_ATTR = Pattern.compile("URI=\"([^\"]*)\"");
+
+    private static byte[] absolutizePlaylist(byte[] body, String baseUrl) {
+        String text = new String(body, StandardCharsets.UTF_8);
+        if (!text.contains("#EXTM3U")) return body;
+        String[] lines = text.split("\n", -1);
+        StringBuilder out = new StringBuilder(text.length() + 64);
+        for (int i = 0; i < lines.length; i += 1) {
+            if (i > 0) out.append('\n');
+            out.append(rewritePlaylistLine(lines[i], baseUrl));
+        }
+        return out.toString().getBytes(StandardCharsets.UTF_8);
+    }
+
+    private static String rewritePlaylistLine(String line, String baseUrl) {
+        String trimmed = line.trim();
+        if (trimmed.isEmpty() || trimmed.startsWith("#")) return rewriteUriAttributes(line, baseUrl);
+        return absoluteAgainst(trimmed, baseUrl);
+    }
+
+    private static String rewriteUriAttributes(String line, String baseUrl) {
+        Matcher matcher = URI_ATTR.matcher(line);
+        StringBuffer out = new StringBuffer();
+        while (matcher.find()) {
+            String absolute = absoluteAgainst(matcher.group(1), baseUrl);
+            matcher.appendReplacement(out, Matcher.quoteReplacement("URI=\"" + absolute + "\""));
+        }
+        matcher.appendTail(out);
+        return out.toString();
+    }
+
+    private static String absoluteAgainst(String ref, String baseUrl) {
+        if (ref.startsWith("http://") || ref.startsWith("https://")) return ref;
+        try {
+            return new URL(new URL(baseUrl), ref).toString();
+        } catch (IOException ex) {
+            return ref;
+        }
     }
 
     private static WebResourceResponse execute(WebResourceRequest request, Target target, String method, String cookie, boolean allowRetry) throws IOException {
@@ -217,6 +318,8 @@ public final class ApiProxy {
         int status = code >= 100 && code <= 599 ? code : 200;
         Map<String, String> headers = responseHeaders(conn, code, target);
         String mime = mimeOf(conn);
+        String length = conn.getHeaderField("Content-Length");
+        if (length != null && !length.isEmpty()) headers.put("Content-Length", length);
         InputStream body = detach(conn, streamOf(conn));
         return new WebResourceResponse(mime, encodingOf(mime), status, reason(status), headers, body);
     }
@@ -233,6 +336,9 @@ public final class ApiProxy {
         if (code >= 300 && code < 400) {
             String location = conn.getHeaderField("Location");
             if (location != null) headers.put("Location", rewriteLocation(location, target));
+        }
+        if (target.play && target.url != null && !target.url.isEmpty()) {
+            headers.put("X-Play-Resolved", target.url.replace("\r", "").replace("\n", ""));
         }
         return headers;
     }
@@ -366,8 +472,33 @@ public final class ApiProxy {
 
     private static InputStream detach(final HttpURLConnection conn, InputStream raw) {
         return new FilterInputStream(raw) {
+            private boolean done;
+
+            @Override
+            public int read() throws IOException {
+                int value = super.read();
+                if (value < 0) done = true;
+                return value;
+            }
+
+            @Override
+            public int read(byte[] buffer, int offset, int length) throws IOException {
+                int count = super.read(buffer, offset, length);
+                if (count < 0) done = true;
+                return count;
+            }
+
+            /** 部分 WebView 把 available()==0 当成正文结束，分片会被截成空的。 */
+            @Override
+            public int available() throws IOException {
+                if (done) return 0;
+                int ready = super.available();
+                return ready > 0 ? ready : 1;
+            }
+
             @Override
             public void close() throws IOException {
+                done = true;
                 try {
                     super.close();
                 } finally {

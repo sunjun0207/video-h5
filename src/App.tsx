@@ -1,10 +1,12 @@
-import { lazy, Suspense, useCallback, useEffect, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { BottomNav } from './components/BottomNav'
+import { MiniPlayer } from './components/MiniPlayer'
 import { ChannelNav } from './components/ChannelNav'
 import { Header } from './components/Header'
 import { BRAND, SLOGAN } from './lib/catalog'
+import { pausePlayback } from './lib/playbackSession'
 import { addSearchHistory } from './lib/storage'
-import { href, parseHash, type Route } from './lib/router'
+import { bindScrollSaver, ensureAppDepth, goBack, href, navigate, parseHash, type Route } from './lib/router'
 import { ChannelPage } from './pages/ChannelPage'
 import { DetailPage } from './pages/DetailPage'
 import { HomePage } from './pages/HomePage'
@@ -25,17 +27,76 @@ export default function App() {
   const [route, setRoute] = useState<Route>(readRoute)
   const [libraryVersion, setLibraryVersion] = useState(0)
   const [searchActive, setSearchActive] = useState(false)
+  const [kept, setKept] = useState<{ id: string; ep: number } | null>(null)
   const bump = useCallback(() => setLibraryVersion((value) => value + 1), [])
+  const scrollMemo = useRef(new Map<string, number>())
+  const routeKeyRef = useRef(href(readRoute()))
+  const scrollLockRef = useRef(0)
+
+  const rememberScroll = useCallback(() => {
+    scrollMemo.current.set(routeKeyRef.current, window.scrollY)
+    scrollLockRef.current = Date.now() + 500
+  }, [])
+
+  useEffect(() => {
+    bindScrollSaver(rememberScroll)
+    return () => bindScrollSaver(() => undefined)
+  }, [rememberScroll])
+
+  useEffect(() => {
+    const onScroll = () => {
+      if (Date.now() < scrollLockRef.current) return
+      scrollMemo.current.set(routeKeyRef.current, window.scrollY)
+    }
+    const onClick = (event: MouseEvent) => {
+      if (event.defaultPrevented || event.button !== 0) return
+      if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
+      const target = event.target
+      if (!(target instanceof Element)) return
+      const link = target.closest('a[href]')
+      if (!link || link.getAttribute('target') === '_blank') return
+      const value = link.getAttribute('href') || ''
+      if (!value.startsWith('#')) return
+      event.preventDefault()
+      navigate(parseHash(value))
+    }
+    window.addEventListener('scroll', onScroll, { passive: true })
+    document.addEventListener('click', onClick, true)
+    return () => {
+      window.removeEventListener('scroll', onScroll)
+      document.removeEventListener('click', onClick, true)
+    }
+  }, [])
 
   useEffect(() => {
     const sync = () => {
-      setRoute(readRoute())
-      window.scrollTo(0, 0)
+      const next = readRoute()
+      routeKeyRef.current = href(next)
+      setRoute(next)
     }
+    if ('scrollRestoration' in window.history) window.history.scrollRestoration = 'manual'
     window.addEventListener('hashchange', sync)
-    if (!window.location.hash) window.location.hash = '#/'
-    return () => window.removeEventListener('hashchange', sync)
+    window.addEventListener('popstate', sync)
+    if (!window.location.hash) window.history.replaceState({ appDepth: 1 }, '', '#/')
+    ensureAppDepth()
+    return () => {
+      window.removeEventListener('hashchange', sync)
+      window.removeEventListener('popstate', sync)
+    }
   }, [])
+
+  useEffect(() => {
+    const key = href(route)
+    const y = route.name === 'play' ? 0 : (scrollMemo.current.get(key) ?? 0)
+    const apply = () => window.scrollTo(0, y)
+    apply()
+    const frame = window.requestAnimationFrame(apply)
+    const timer = window.setTimeout(apply, 60)
+    return () => {
+      window.cancelAnimationFrame(frame)
+      window.clearTimeout(timer)
+    }
+  }, [route])
 
   useEffect(() => {
     if (route.name === 'play') return
@@ -77,13 +138,19 @@ export default function App() {
     const text = keyword.trim()
     if (text) addSearchHistory(text)
     bump()
-    window.location.hash = href({ name: 'search', q: text })
+    navigate({ name: 'search', q: text })
   }
 
+  useEffect(() => {
+    if (route.name === 'play') setKept({ id: route.id, ep: route.ep })
+  }, [route])
+
   const playing = route.name === 'play'
+  const live = playing ? { id: route.id, ep: route.ep } : kept
+  const showMini = Boolean(live) && !playing
 
   return (
-    <div className={playing ? 'app playing' : searchActive ? 'app searching' : 'app'}>
+    <div className={playing ? 'app playing' : searchActive ? 'app searching' : showMini ? 'app has-mini' : 'app'}>
       <Header />
       {playing ? null : <ChannelNav route={route} />}
       <main>
@@ -99,18 +166,41 @@ export default function App() {
           />
         ) : null}
         {route.name === 'detail' ? (
-          <DetailPage id={route.id} libraryVersion={libraryVersion} onLibraryChange={bump} />
+          <DetailPage
+            id={route.id}
+            libraryVersion={libraryVersion}
+            onLibraryChange={bump}
+            onBack={() => goBack({ name: 'home' })}
+          />
         ) : null}
-        {route.name === 'play' ? (
-          <Suspense
-            fallback={
-              <div className="wrap">
-                <Pending text="正在为你加载精彩内容…" />
-              </div>
-            }
-          >
-            <PlayPage id={route.id} ep={route.ep} onLibraryChange={bump} />
-          </Suspense>
+        {live ? (
+          <div className={playing ? undefined : 'play-dock'} inert={playing ? undefined : true} aria-hidden={playing ? undefined : true}>
+            <Suspense
+              fallback={
+                playing ? (
+                  <div className="wrap">
+                    <button type="button" className="detail-back" aria-label="返回" onClick={() => goBack({ name: 'home' })}>
+                      <BackGlyph />
+                    </button>
+                    <Pending text="正在为你加载精彩内容…" />
+                  </div>
+                ) : null
+              }
+            >
+              <PlayPage
+                key={live.id}
+                id={live.id}
+                ep={live.ep}
+                visible={playing}
+                onLibraryChange={bump}
+                onKeepEp={(ep) => setKept({ id: live.id, ep })}
+                onBack={() => {
+                  if (route.name === 'play') goBack({ name: 'detail', id: route.id })
+                  else goBack({ name: 'home' })
+                }}
+              />
+            </Suspense>
+          </div>
         ) : null}
         {route.name === 'favorite' ? (
           <LibraryPage mode="favorite" libraryVersion={libraryVersion} onLibraryChange={bump} />
@@ -125,8 +215,28 @@ export default function App() {
           <span>年轻人的精彩视频世界。精彩不设限，快乐不打烊。</span>
         </footer>
       )}
+      {showMini && live ? (
+        <MiniPlayer
+          id={live.id}
+          ep={live.ep}
+          onOpen={() => navigate({ name: 'play', id: live.id, ep: live.ep })}
+          onQueue={() => window.dispatchEvent(new Event('app-open-queue'))}
+          onClose={() => {
+            pausePlayback()
+            setKept(null)
+          }}
+        />
+      ) : null}
       <BottomNav route={route} />
     </div>
+  )
+}
+
+function BackGlyph() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden>
+      <path d="M15 5 8 12l7 7" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
   )
 }
 

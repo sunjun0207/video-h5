@@ -97,6 +97,16 @@ export function absolutePlayUrl(absolute: string): string {
   return asPlayProxy(absolute)
 }
 
+/** 安装包转发在服务端跟完跳转后，把最终片源地址放在这个响应头里。 */
+export const PLAY_RESOLVED_HEADER = 'X-Play-Resolved'
+
+/** 网页里跳转后 response.url 就是最终地址；安装包里用响应头补上这一跳。 */
+export function resolvedPlayUrl(fromResponseUrl: string, hinted?: string | null): string {
+  const value = hinted?.trim()
+  if (value && /^https?:\/\//i.test(value)) return value
+  return fromResponseUrl
+}
+
 export function upstreamFromPlay(value: string): string | null {
   const path = value.startsWith('http') ? `${new URL(value).pathname}${new URL(value).search}` : value
   const matched = path.match(/^\/api-video-pomelo7-server\/play\/(https?)\/([^/]+)\/(\d+)(\/.*)$/)

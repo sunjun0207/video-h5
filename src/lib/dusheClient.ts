@@ -1,7 +1,7 @@
 import type { ChannelId, PlayLine, VideoItem } from './types'
 import { cleanAds } from './adScan'
 import { stripInjectedAds } from './hlsAds'
-import { absolutePlayUrl, coverUrl, playProxy, seedPlaylist, upstreamFromPlay, useProxy, VOD_COOKIE_PATH, vodUrl } from './mediaProxy'
+import { absolutePlayUrl, coverUrl, PLAY_RESOLVED_HEADER, playProxy, resolvedPlayUrl, seedPlaylist, upstreamFromPlay, useProxy, VOD_COOKIE_PATH, vodUrl } from './mediaProxy'
 import { sha1 } from './sha1'
 
 const CHANNELS: { id: ChannelId; name: string; path: string }[] = [
@@ -475,7 +475,8 @@ async function readPlaylist(upstream: string, signal: AbortSignal): Promise<{ te
   const response = await fetch(playProxy(upstream), { credentials: useProxy ? 'same-origin' : 'omit', signal })
   const text = stripInjectedAds(await response.text())
   if (!response.ok || !text.includes('#EXTM3U')) throw new Error('播放列表无效')
-  return { text, url: upstreamFromPlay(response.url) || upstream }
+  const followed = upstreamFromPlay(response.url) || response.url || upstream
+  return { text, url: resolvedPlayUrl(followed, response.headers.get(PLAY_RESOLVED_HEADER)) }
 }
 
 function looksLikeMedia(buf: Uint8Array): boolean {
