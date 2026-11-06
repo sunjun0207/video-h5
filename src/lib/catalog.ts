@@ -1,5 +1,5 @@
 /** 品牌名跟着构建环境走，标题里「 · 」后面的副标题不算。 */
-export const BRAND = (import.meta.env.VITE_APP_TITLE || '观影jun.sun').replace(/ · .+$/, '')
+export const BRAND = (import.meta.env.VITE_APP_TITLE || '碎冰视频').replace(/ · .+$/, '')
 export const SLOGAN = '好看的，都在这里！'
 
 /** row、desc 是首页栏目名和副标题，desc 也用在频道页标题下面。 */

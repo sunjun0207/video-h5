@@ -11,6 +11,9 @@
     "build:local": "tsc --noEmit && vite build",
     "build:dev": "tsc --noEmit && vite build --mode dev",
     "build:pro": "tsc --noEmit && vite build --mode pro",
+    "build:apk": "tsc --noEmit && vite build --mode apk",
+    "apk:sync": "npm run build:apk && cap sync android",
+    "apk:debug": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-apk.ps1",
     "preview": "vite preview --mode pro",
     "docker:local:build": "docker compose -f docker-compose.local.yml build",
     "docker:local:up": "docker compose -f docker-compose.local.yml up -d",
@@ -31,12 +34,15 @@
     "docker:pro:logs": "docker compose -f docker-compose.pro.yml logs -f video-h5"
   },
   "dependencies": {
+    "@capacitor/android": "^6.2.3",
+    "@capacitor/core": "^6.2.3",
     "hls.js": "^1.7.3",
     "mux.js": "^6.3.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
   "devDependencies": {
+    "@capacitor/cli": "^6.2.3",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^4.3.4",
