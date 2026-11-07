@@ -91,3 +91,31 @@ export function cleanAds(text: string, url: string): Promise<string> {
   }
   return task
 }
+
+/**
+ * 播放器在等这份列表。探测已经有结果就用探测后的；超过 waitMs 还在读分片开头，
+ * 就先用标记能去掉的那份，免得开播干等。
+ */
+export function cleanAdsSoon(text: string, url: string, waitMs: number): Promise<string> {
+  const stripped = stripInjectedAds(text)
+  const task = cleanAds(text, url)
+  return new Promise((resolve) => {
+    let done = false
+    const finish = (value: string) => {
+      if (done) return
+      done = true
+      resolve(value)
+    }
+    const timer = window.setTimeout(() => finish(stripped), waitMs)
+    task.then(
+      (value) => {
+        window.clearTimeout(timer)
+        finish(value)
+      },
+      () => {
+        window.clearTimeout(timer)
+        finish(stripped)
+      },
+    )
+  })
+}

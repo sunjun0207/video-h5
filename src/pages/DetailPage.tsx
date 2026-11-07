@@ -74,7 +74,7 @@ export function DetailPage({ id, libraryVersion, onLibraryChange, onBack }: Prop
         <p className="crumb">
           <button type="button" className="detail-back" aria-label="返回" onClick={onBack}>
             <svg viewBox="0 0 24 24" aria-hidden>
-              <path d="M15 5 8 12l7 7" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+              <path d="M14.2 6.2 8 12l6.2 5.8" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
             </svg>
           </button>
           <a href={href({ name: 'home' })}>首页</a>
@@ -155,7 +155,7 @@ export function DetailPage({ id, libraryVersion, onLibraryChange, onBack }: Prop
 function BackGlyph() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden>
-      <path d="M15 5 8 12l7 7" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M14.2 6.2 8 12l6.2 5.8" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   )
 }

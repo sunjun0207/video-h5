@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import Hls, { type XhrLoader } from 'hls.js'
-import { cleanAds } from '../lib/adScan'
+import { cleanAdsSoon } from '../lib/adScan'
 import { bindPlaybackControls, pushFrame } from '../lib/playbackSession'
 import { absolutePlayUrl, PLAY_RESOLVED_HEADER, resolvedPlayUrl, rewritePlaylist, takePlaylist, upstreamFromPlay, useProxy } from '../lib/mediaProxy'
 import { reportPlayback } from '../lib/playback'
@@ -8,9 +8,9 @@ import { createPrefetcher } from '../lib/prefetch'
 import type { Episode } from '../lib/types'
 
 /** 正在拉的分片之外，最多再提前并行拉几个。 */
-const PREFETCH_AHEAD = 3
-/** 缓冲不到这么多秒时只多拉一个，带宽先给眼下要用的分片。 */
-const PREFETCH_DEEP_AT = 10
+const PREFETCH_AHEAD = 4
+/** 缓冲不到这么多秒时少拉一些，带宽先给眼下要用的分片。 */
+const PREFETCH_DEEP_AT = 12
 /** 开播这么久还一点画面都没缓冲上，就当这条线路连不上。探线路时它刚下得动，正常的线路用不了这么久。 */
 const START_LIMIT = 20_000
 /** 播放中进度条、时间、音量和全屏这么久没人碰就收起来。 */
@@ -111,7 +111,7 @@ export function Player({ episode, resumeAt, loadError = '', onTime, onEnded, onS
         // 还没拿到时长时不能拖进度。
       }
       holdPlay.current = true
-      void video.play()
+      void video.play().catch(() => undefined)
       return
     }
     if (endedRef.current) return
@@ -179,8 +179,8 @@ export function Player({ episode, resumeAt, loadError = '', onTime, onEnded, onS
       if (!live || started || starting || endedRef.current) return
       const ahead = bufferedAhead()
       const waited = Date.now() - attachedAt
-      if (ahead < 4 && waited < 10000) return
-      if (video.readyState < 3 && ahead < 2 && waited < 15000) return
+      const canStart = ahead >= 1 || (video.readyState >= 3 && ahead >= 0.3) || (ahead > 0 && waited >= 1800)
+      if (!canStart && waited < 8000) return
       starting = true
       void video.play().then(() => {
         if (!live) return
@@ -237,7 +237,7 @@ export function Player({ episode, resumeAt, loadError = '', onTime, onEnded, onS
             this.release = () => {
               waiting = false
             }
-            void cleanAds(data, finalUpstream).then((cleaned) => {
+            void cleanAdsSoon(data, finalUpstream, 350).then((cleaned) => {
               if (!waiting) return
               this.release = null
               onSuccess({ ...response, data: rewritePlaylist(cleaned, finalUpstream) }, stats, ctx, networkDetails)
@@ -266,7 +266,7 @@ export function Player({ episode, resumeAt, loadError = '', onTime, onEnded, onS
           const entry = plain ? prefetch.take(original) : undefined
           const track = tracks.get(`${frag.type}:${frag.level}`)
           if (plain && track && primed) {
-            prefetch.plan(track.urls, frag.sn - track.startSN + 1, bufferedAhead() >= PREFETCH_DEEP_AT ? PREFETCH_AHEAD : 1)
+            prefetch.plan(track.urls, frag.sn - track.startSN + 1, bufferedAhead() >= PREFETCH_DEEP_AT ? PREFETCH_AHEAD : 2)
           }
           if (!entry) {
             super.load(context, config, callbacks)
@@ -334,7 +334,7 @@ export function Player({ episode, resumeAt, loadError = '', onTime, onEnded, onS
         maxBufferSize: 60 * 1000 * 1000,
         backBufferLength: 12,
         startFragPrefetch: true,
-        maxBufferHole: 0.5,
+        maxBufferHole: 1,
         nudgeMaxRetry: 8,
         manifestLoadPolicy: { default: slow },
         playlistLoadPolicy: { default: slow },
@@ -442,8 +442,10 @@ export function Player({ episode, resumeAt, loadError = '', onTime, onEnded, onS
     let canvas: HTMLCanvasElement | null = null
     const send = () => {
       const video = videoRef.current
-      if (!video || video.paused || video.ended || video.videoWidth === 0 || video.readyState < 2) return
-      try {
+        if (!video || video.paused || video.ended || video.videoWidth === 0 || video.readyState < 2) return
+        const ahead = video.buffered.length ? video.buffered.end(video.buffered.length - 1) - video.currentTime : 0
+        if (ahead < 6) return
+        try {
         if (!canvas) {
           canvas = document.createElement('canvas')
           canvas.width = 240
@@ -457,8 +459,7 @@ export function Player({ episode, resumeAt, loadError = '', onTime, onEnded, onS
         // 直连片源时画面跨域，截不到新的一帧。
       }
     }
-    send()
-    const timer = window.setInterval(send, 800)
+    const timer = window.setInterval(send, 2500)
     return () => window.clearInterval(timer)
   }, [playing])
 
@@ -486,7 +487,7 @@ export function Player({ episode, resumeAt, loadError = '', onTime, onEnded, onS
         endedRef.current = false
         holdPlay.current = true
         kicks.current = 0
-        void video.play()
+        void video.play().catch(() => undefined)
       },
       seek: (seconds) => {
         const video = videoRef.current
@@ -504,7 +505,7 @@ export function Player({ episode, resumeAt, loadError = '', onTime, onEnded, onS
       kicks.current = 0
       const video = videoRef.current
       if (!video || !holdPlay.current || !video.paused) return
-      void video.play()
+      void video.play().catch(() => undefined)
     }
     document.addEventListener('visibilitychange', onVisible)
     return () => {
@@ -527,7 +528,7 @@ export function Player({ episode, resumeAt, loadError = '', onTime, onEnded, onS
     if (!node || !holdPlay.current) return
     const nudge = window.setTimeout(() => {
       node.style.transform = 'translateZ(0)'
-      if (holdPlay.current) void node.play()
+      if (holdPlay.current) void node.play().catch(() => undefined)
     }, 60)
     return () => window.clearTimeout(nudge)
   }, [present])
@@ -597,7 +598,10 @@ export function Player({ episode, resumeAt, loadError = '', onTime, onEnded, onS
       endedRef.current = false
       holdPlay.current = true
       kicks.current = 0
-      void video.play().catch(() => setError('播放遇到一点问题，换个方式再试试'))
+      void video.play().catch((reason: unknown) => {
+        if (reason instanceof DOMException && reason.name === 'AbortError') return
+        setError('播放遇到一点问题，换个方式再试试')
+      })
     } else {
       holdPlay.current = false
       kicks.current = 0
@@ -727,10 +731,53 @@ export function Player({ episode, resumeAt, loadError = '', onTime, onEnded, onS
 
   const message = loadError || error
   const showPlay = !message && (needTap || (!booting && !waiting && !playing))
+  const overlay = full || shell
+  const seekRow = (
+    <div className="controls-seek">
+      <span className="time">{formatTime(current)}</span>
+      <input
+        type="range"
+        min={0}
+        max={duration || 0}
+        step={0.1}
+        value={Math.min(current, duration || 0)}
+        aria-label="进度"
+        onChange={(event) => seek(Number(event.target.value))}
+      />
+      <span className="time">{formatTime(duration)}</span>
+    </div>
+  )
+  const toolRow = (
+    <div className="controls-tools">
+      <button type="button" className="tool-btn" onClick={toggle} aria-label={playing ? '暂停' : '播放'}>
+        {playing ? <PauseMark /> : <PlayMark />}
+        <span>{playing ? '暂停' : '播放'}</span>
+      </button>
+      <button type="button" className="tool-btn" onClick={toggleMute} aria-label={muted || volume === 0 ? '打开声音' : '静音'}>
+        <VolumeIcon level={muted ? 0 : volume} />
+        <span>{muted || volume === 0 ? '静音' : '声音'}</span>
+      </button>
+      <button
+        type="button"
+        className={loop ? 'tool-btn loop-btn is-on' : 'tool-btn loop-btn'}
+        aria-pressed={loop}
+        aria-label={loop ? '关闭循环播放' : '打开循环播放'}
+        onClick={() => onToggleLoop?.()}
+      >
+        <LoopIcon />
+        <span>循环</span>
+      </button>
+      <button type="button" className="tool-btn" onClick={fullscreen} aria-label={overlay ? '退出全屏' : '全屏'}>
+        {overlay ? <ExitFullscreenIcon /> : <FullscreenIcon />}
+        <span>{overlay ? '退出' : '全屏'}</span>
+      </button>
+    </div>
+  )
 
   return (
+    <div className="player">
     <div className={`stage${full ? ' is-full' : ''}${shell ? ' is-shell' : ''}`} ref={stageRef} onClick={onSurface}>
-      {onBack || onOpenQueue ? (
+      {overlay && (onBack || onOpenQueue) ? (
         <div
           className={chromeOn ? 'stage-top' : 'stage-top is-hidden'}
           aria-hidden={!chromeOn}
@@ -754,6 +801,7 @@ export function Player({ episode, resumeAt, loadError = '', onTime, onEnded, onS
               }}
             >
               <BackGlyph />
+              <span>返回</span>
             </button>
           ) : (
             <span />
@@ -802,7 +850,7 @@ export function Player({ episode, resumeAt, loadError = '', onTime, onEnded, onS
               return
             }
             kicks.current += 1
-            void video.play()
+            void video.play().catch(() => undefined)
           }, 250)
         }}
         onWaiting={() => {
@@ -859,41 +907,51 @@ export function Player({ episode, resumeAt, loadError = '', onTime, onEnded, onS
           }}
           aria-label="播放"
         >
-          ▶
+          <PlayMark />
         </button>
       ) : null}
-      <div
-        className={chromeOn ? 'controls' : 'controls is-hidden'}
-        aria-hidden={!chromeOn}
-        onClick={(event) => event.stopPropagation()}
-        onPointerDown={(event) => {
-          if (event.currentTarget.setPointerCapture) event.currentTarget.setPointerCapture(event.pointerId)
-          holdChrome(true)
-        }}
-        onPointerUp={() => holdChrome(false)}
-        onPointerCancel={() => holdChrome(false)}
-        onLostPointerCapture={() => holdChrome(false)}
-      >
-        <div className="controls-seek">
-          <span className="time">{formatTime(current)}</span>
-          <input
-            type="range"
-            min={0}
-            max={duration || 0}
-            step={0.1}
-            value={Math.min(current, duration || 0)}
-            aria-label="进度"
-            onChange={(event) => seek(Number(event.target.value))}
-          />
-          <span className="time">{formatTime(duration)}</span>
+      {overlay ? (
+        <div
+          className={chromeOn ? 'controls' : 'controls is-hidden'}
+          aria-hidden={!chromeOn}
+          onClick={(event) => event.stopPropagation()}
+          onPointerDown={(event) => {
+            if (event.currentTarget.setPointerCapture) event.currentTarget.setPointerCapture(event.pointerId)
+            holdChrome(true)
+          }}
+          onPointerUp={() => holdChrome(false)}
+          onPointerCancel={() => holdChrome(false)}
+          onLostPointerCapture={() => holdChrome(false)}
+        >
+          {seekRow}
+          {toolRow}
         </div>
-        <div className="controls-tools">
-          <button type="button" className="icon-btn" onClick={toggle} aria-label={playing ? '暂停' : '播放'}>
-            {playing ? '❚❚' : '▶'}
-          </button>
-          <button type="button" className="icon-btn" onClick={toggleMute} aria-label={muted || volume === 0 ? '打开声音' : '静音'}>
-            <VolumeIcon level={muted ? 0 : volume} />
-          </button>
+      ) : null}
+    </div>
+    {overlay ? null : (
+      <div className="play-bar">
+        {onBack || onOpenQueue ? (
+          <div className="play-bar-top">
+            {onBack ? (
+              <button type="button" className="bar-back" aria-label="返回" onClick={onBack}>
+                <BackGlyph />
+                <span>返回</span>
+              </button>
+            ) : (
+              <span />
+            )}
+            {onOpenQueue ? (
+              <button type="button" className="bar-list" aria-label="播放列表" onClick={openQueue}>
+                <ListGlyph />
+                <span>列表</span>
+              </button>
+            ) : null}
+          </div>
+        ) : null}
+        {seekRow}
+        {toolRow}
+        <div className="volume-row">
+          <span>音量</span>
           <input
             className="volume"
             type="range"
@@ -904,22 +962,9 @@ export function Player({ episode, resumeAt, loadError = '', onTime, onEnded, onS
             aria-label="音量"
             onChange={(event) => applyVolume(Number(event.target.value))}
           />
-          <button
-            type="button"
-            className={loop ? 'fs-btn loop-btn is-on' : 'fs-btn loop-btn'}
-            aria-pressed={loop}
-            aria-label={loop ? '关闭循环播放' : '打开循环播放'}
-            onClick={() => onToggleLoop?.()}
-          >
-            <LoopIcon />
-            <span>循环</span>
-          </button>
-          <button type="button" className="fs-btn" onClick={fullscreen} aria-label={full || shell ? '退出全屏' : '全屏'}>
-            {full || shell ? <ExitFullscreenIcon /> : <FullscreenIcon />}
-            <span>{full || shell ? '退出全屏' : '全屏'}</span>
-          </button>
         </div>
       </div>
+    )}
     </div>
   )
 }
@@ -927,7 +972,23 @@ export function Player({ episode, resumeAt, loadError = '', onTime, onEnded, onS
 function BackGlyph() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden>
-      <path d="M15 5 8 12l7 7" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M14.2 6.2 8 12l6.2 5.8" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+function PlayMark() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden>
+      <path d="M9 7.1v9.8l8.4-4.9L9 7.1Z" fill="currentColor" />
+    </svg>
+  )
+}
+
+function PauseMark() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden>
+      <path d="M7.8 6.2h2.8v11.6H7.8V6.2Zm5.6 0h2.8v11.6h-2.8V6.2Z" fill="currentColor" />
     </svg>
   )
 }

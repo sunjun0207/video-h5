@@ -223,7 +223,7 @@ export default function App() {
           />
         ) : null}
         {live ? (
-          <div className={playing ? undefined : 'play-dock'} aria-hidden={playing ? undefined : true}>
+          <div className={playing ? undefined : 'play-dock'}>
             <Suspense
               fallback={
                 playing ? (
@@ -284,7 +284,7 @@ export default function App() {
 function BackGlyph() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden>
-      <path d="M15 5 8 12l7 7" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M14.2 6.2 8 12l6.2 5.8" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   )
 }

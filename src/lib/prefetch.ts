@@ -27,7 +27,7 @@ export function createPrefetcher(ahead: number, credentials: RequestCredentials)
     const controller = new AbortController()
     const entry: Prefetched = { controller, startedAt: performance.now(), firstAt: 0, endAt: 0, promise: Promise.resolve(new ArrayBuffer(0)) }
     entry.promise = (async () => {
-      const response = await fetch(url, { credentials, signal: controller.signal, priority: 'low' })
+      const response = await fetch(url, { credentials, signal: controller.signal })
       entry.firstAt = performance.now()
       if (!response.ok) throw new Error(`HTTP ${response.status}`)
       const data = await response.arrayBuffer()
