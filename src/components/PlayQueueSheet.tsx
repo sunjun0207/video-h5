@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { getVideo } from '../lib/api'
 import { ensureDetail } from '../lib/source'
-import { getHistory } from '../lib/storage'
+import { getHistory, isFavorite, toggleFavorite } from '../lib/storage'
 import type { VideoItem } from '../lib/types'
 
 type Tab = 'now' | 'recent'
@@ -28,6 +28,12 @@ export function PlayQueueSheet({ open, videoId, ep, onClose, onPick }: Props) {
   const video = getVideo(videoId)
   const history = getHistory()
   void revision
+
+  useEffect(() => {
+    const onFavorites = () => setRevision((value) => value + 1)
+    window.addEventListener('video-h5-favorites', onFavorites)
+    return () => window.removeEventListener('video-h5-favorites', onFavorites)
+  }, [])
 
   useEffect(() => {
     if (!open) return
@@ -96,18 +102,16 @@ export function PlayQueueSheet({ open, videoId, ep, onClose, onPick }: Props) {
 function NowList({ video, ep, onPick }: { video: VideoItem | undefined; ep: number; onPick: (id: string, ep: number) => void }) {
   if (!video || video.episodes.length === 0) return <div className="empty">还没有正在播放的内容</div>
   return video.episodes.map((episode, index) => (
-    <button
+    <QueueRow
       key={episode.id}
-      type="button"
-      className={index === ep ? 'queue-row on' : 'queue-row'}
-      onClick={() => onPick(video.id, index)}
-    >
-      <span className="queue-index">{index + 1}</span>
-      <span className="queue-main">
-        <strong>{episode.title}</strong>
-      </span>
-      {index === ep ? <em>正在看</em> : null}
-    </button>
+      current={index === ep}
+      index={index + 1}
+      title={episode.title}
+      subtitle={subtitleOf(video.title, episode.title)}
+      favorite={isFavorite(video.id)}
+      onOpen={() => onPick(video.id, index)}
+      onFavorite={() => toggleFavorite(video.id)}
+    />
   ))
 }
 
@@ -121,15 +125,73 @@ function RecentList({ videoId, ep, onPick }: { videoId: string; ep: number; onPi
     const part = episode?.title || `第 ${entry.ep + 1} 集`
     const current = entry.id === videoId && entry.ep === ep
     return (
-      <button key={entry.id} type="button" className={current ? 'queue-row on' : 'queue-row'} onClick={() => onPick(entry.id, entry.ep)}>
-        <span className="queue-index">{entry.ep + 1}</span>
-        <span className="queue-main">
-          <strong>{title}</strong>
-          <small>
-            {part} · {formatClock(entry.time)}
-          </small>
-        </span>
-      </button>
+      <QueueRow
+        key={entry.id}
+        current={current}
+        index={entry.ep + 1}
+        title={title}
+        subtitle={`${part} · ${formatClock(entry.time)}`}
+        favorite={isFavorite(entry.id)}
+        onOpen={() => onPick(entry.id, entry.ep)}
+        onFavorite={() => toggleFavorite(entry.id)}
+      />
     )
   })
+}
+
+function subtitleOf(show: string, episode: string) {
+  return episode && episode !== show ? show : '正片'
+}
+
+function QueueRow({
+  current,
+  index,
+  title,
+  subtitle,
+  favorite,
+  onOpen,
+  onFavorite,
+}: {
+  current: boolean
+  index: number
+  title: string
+  subtitle: string
+  favorite: boolean
+  onOpen: () => void
+  onFavorite: () => void
+}) {
+  return (
+    <div className={current ? 'queue-row on' : 'queue-row'}>
+      <button type="button" className="queue-open" onClick={onOpen}>
+        <span className="queue-index">{index}</span>
+        <span className="queue-main">
+          <strong>{title}</strong>
+          <small>{subtitle}</small>
+        </span>
+      </button>
+      <button
+        type="button"
+        className={favorite ? 'queue-heart is-on' : 'queue-heart'}
+        aria-label={favorite ? '取消收藏' : '收藏'}
+        aria-pressed={favorite}
+        onClick={onFavorite}
+      >
+        <HeartIcon solid={favorite} />
+      </button>
+    </div>
+  )
+}
+
+function HeartIcon({ solid }: { solid: boolean }) {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden>
+      <path
+        d="M12 20s-7-4.4-7-9a4 4 0 0 1 7-2 4 4 0 0 1 7 2c0 4.6-7 9-7 9Z"
+        fill={solid ? 'currentColor' : 'none'}
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinejoin="round"
+      />
+    </svg>
+  )
 }

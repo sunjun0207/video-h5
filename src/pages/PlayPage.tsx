@@ -86,6 +86,7 @@ export function PlayPage({ id, ep, onLibraryChange, onBack, visible = true, onKe
   const [saveNote, setSaveNote] = useState('')
   const [savedFile, setSavedFile] = useState('')
   const [queueOpen, setQueueOpen] = useState(false)
+  const [loop, setLoop] = useState(false)
   useEffect(() => {
     const open = () => setQueueOpen(true)
     window.addEventListener('app-open-queue', open)
@@ -197,7 +198,7 @@ export function PlayPage({ id, ep, onLibraryChange, onBack, visible = true, onKe
   }
 
   const report = useCallback(
-    (media: { playing: boolean; current: number; duration: number }) => {
+    (media: { playing: boolean; current: number; duration: number; thumb?: string }) => {
       if (!item || !episode) return
       publishNow({
         id: item.id,
@@ -267,10 +268,13 @@ export function PlayPage({ id, ep, onLibraryChange, onBack, visible = true, onKe
             onTime={remember}
             onStartFail={switchLine}
             present={visible}
+            loop={loop}
+            onToggleLoop={() => setLoop((value) => !value)}
             onMedia={report}
             onBack={onBack}
             onOpenQueue={() => setQueueOpen(true)}
             onEnded={() => {
+              if (loop) return
               if (index >= item.episodes.length - 1) return
               if (visible) goPlay(item.id, index + 1)
               else onKeepEp?.(index + 1)

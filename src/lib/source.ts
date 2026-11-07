@@ -102,7 +102,9 @@ function fetchDetail(id: string): Promise<VideoItem> {
         if (!item.cover && current.cover) item.cover = current.cover
         if (!item.badge && current.badge) item.badge = current.badge
         for (const episode of item.episodes) {
-          const prev = current.episodes.find((old) => old.playPath === episode.playPath)
+          if (!episode.playPath) continue
+          const matches = current.episodes.filter((old) => old.playPath && old.playPath === episode.playPath)
+          const prev = matches.length === 1 ? matches[0] : undefined
           if (!prev?.url) continue
           episode.url = prev.url
           episode.line = prev.line

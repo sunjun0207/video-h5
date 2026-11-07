@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import Hls, { type XhrLoader } from 'hls.js'
 import { cleanAds } from '../lib/adScan'
-import { bindPlaybackControls } from '../lib/playbackSession'
+import { bindPlaybackControls, pushFrame } from '../lib/playbackSession'
 import { absolutePlayUrl, PLAY_RESOLVED_HEADER, resolvedPlayUrl, rewritePlaylist, takePlaylist, upstreamFromPlay, useProxy } from '../lib/mediaProxy'
 import { reportPlayback } from '../lib/playback'
 import { createPrefetcher } from '../lib/prefetch'
@@ -46,7 +46,9 @@ type Props = {
   onOpenQueue?: () => void
   /** 离开播放页后播放器还留着，这时要退出全屏，画面交给底部小条。 */
   present?: boolean
-  onMedia?: (state: { playing: boolean; current: number; duration: number }) => void
+  loop?: boolean
+  onToggleLoop?: () => void
+  onMedia?: (state: { playing: boolean; current: number; duration: number; thumb?: string }) => void
 }
 
 function formatTime(value: number): string {
@@ -57,7 +59,7 @@ function formatTime(value: number): string {
   return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
 }
 
-export function Player({ episode, resumeAt, loadError = '', onTime, onEnded, onStartFail, onBack, onOpenQueue, present = true, onMedia }: Props) {
+export function Player({ episode, resumeAt, loadError = '', onTime, onEnded, onStartFail, onBack, onOpenQueue, present = true, loop = false, onToggleLoop, onMedia }: Props) {
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const stageRef = useRef<HTMLDivElement | null>(null)
   const resumed = useRef(false)
@@ -88,15 +90,34 @@ export function Player({ episode, resumeAt, loadError = '', onTime, onEnded, onS
   const mutedRef = useRef(false)
   const revealRef = useRef<() => void>(() => {})
   const toggleRef = useRef<() => void>(() => {})
+  /** 用户要接着播。切到后台时系统会把画面按停，这个标记用来把它拉起来。 */
+  const holdPlay = useRef(false)
+  const kicks = useRef(0)
   const onMediaRef = useRef(onMedia)
+  const loopRef = useRef(loop)
+  const thumbAt = useRef(0)
   onMediaRef.current = onMedia
   onEndedRef.current = onEnded
   onStartFailRef.current = onStartFail
+  loopRef.current = loop
 
   const finish = () => {
+    const video = videoRef.current
+    if (loopRef.current) {
+      if (!video || video.currentTime < 1) return
+      try {
+        video.currentTime = 0
+      } catch {
+        // 还没拿到时长时不能拖进度。
+      }
+      holdPlay.current = true
+      void video.play()
+      return
+    }
     if (endedRef.current) return
     endedRef.current = true
-    videoRef.current?.pause()
+    holdPlay.current = false
+    video?.pause()
     onEndedRef.current()
   }
 
@@ -396,15 +417,100 @@ export function Player({ episode, resumeAt, loadError = '', onTime, onEnded, onS
   revealRef.current = reveal
 
   useEffect(() => {
-    onMediaRef.current?.({ playing, current, duration })
+    let thumb: string | undefined
+    const video = videoRef.current
+    if (video && video.videoWidth > 0 && video.readyState >= 2 && thumbAt.current === 0) {
+      try {
+        const canvas = document.createElement('canvas')
+        canvas.width = 320
+        canvas.height = 180
+        const context = canvas.getContext('2d')
+        if (context) {
+          context.drawImage(video, 0, 0, 320, 180)
+          thumb = canvas.toDataURL('image/jpeg', 0.72)
+          thumbAt.current = Date.now()
+        }
+      } catch {
+        // 直连片源时画面跨域，截不了，通知栏改用封面。
+      }
+    }
+    onMediaRef.current?.({ playing, current, duration, thumb })
   }, [playing, current, duration])
+
+  useEffect(() => {
+    if (!playing) return
+    let canvas: HTMLCanvasElement | null = null
+    const send = () => {
+      const video = videoRef.current
+      if (!video || video.paused || video.ended || video.videoWidth === 0 || video.readyState < 2) return
+      try {
+        if (!canvas) {
+          canvas = document.createElement('canvas')
+          canvas.width = 240
+          canvas.height = 136
+        }
+        const context = canvas.getContext('2d')
+        if (!context) return
+        context.drawImage(video, 0, 0, canvas.width, canvas.height)
+        pushFrame(canvas.toDataURL('image/jpeg', 0.55))
+      } catch {
+        // 直连片源时画面跨域，截不到新的一帧。
+      }
+    }
+    send()
+    const timer = window.setInterval(send, 800)
+    return () => window.clearInterval(timer)
+  }, [playing])
+
+  useEffect(() => {
+    document.documentElement.classList.toggle('is-shell-full', shell)
+    const meta = document.querySelector('meta[name="theme-color"]')
+    if (meta) meta.setAttribute('content', shell ? '#000000' : '#f5f6f8')
+    return () => {
+      document.documentElement.classList.remove('is-shell-full')
+      document.querySelector('meta[name="theme-color"]')?.setAttribute('content', '#f5f6f8')
+    }
+  }, [shell])
 
   useEffect(() => {
     bindPlaybackControls({
       toggle: () => toggleRef.current(),
-      pause: () => videoRef.current?.pause(),
+      pause: () => {
+        holdPlay.current = false
+        kicks.current = 0
+        videoRef.current?.pause()
+      },
+      play: () => {
+        const video = videoRef.current
+        if (!video) return
+        endedRef.current = false
+        holdPlay.current = true
+        kicks.current = 0
+        void video.play()
+      },
+      seek: (seconds) => {
+        const video = videoRef.current
+        if (!video) return
+        const next = Math.max(0, seconds)
+        if (endAtRef.current > 8 && next < endAtRef.current - 1) endedRef.current = false
+        try {
+          video.currentTime = next
+        } catch {
+          // 时长还没到，拖不动。
+        }
+      },
     })
-    return () => bindPlaybackControls(null)
+    const onVisible = () => {
+      kicks.current = 0
+      const video = videoRef.current
+      if (!video || !holdPlay.current || !video.paused) return
+      void video.play()
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible)
+      bindPlaybackControls(null)
+    }
   }, [])
 
   useEffect(() => {
@@ -417,6 +523,13 @@ export function Player({ episode, resumeAt, loadError = '', onTime, onEnded, onS
     if (video?.webkitDisplayingFullscreen) video.webkitExitFullscreen?.()
     if (document.fullscreenElement && document.exitFullscreen) void document.exitFullscreen()
     else if (doc.webkitFullscreenElement) doc.webkitExitFullscreen?.()
+    const node = videoRef.current
+    if (!node || !holdPlay.current) return
+    const nudge = window.setTimeout(() => {
+      node.style.transform = 'translateZ(0)'
+      if (holdPlay.current) void node.play()
+    }, 60)
+    return () => window.clearTimeout(nudge)
   }, [present])
 
   useEffect(() => {
@@ -482,8 +595,14 @@ export function Player({ episode, resumeAt, loadError = '', onTime, onEnded, onS
     if (!video) return
     if (video.paused) {
       endedRef.current = false
+      holdPlay.current = true
+      kicks.current = 0
       void video.play().catch(() => setError('播放遇到一点问题，换个方式再试试'))
-    } else video.pause()
+    } else {
+      holdPlay.current = false
+      kicks.current = 0
+      video.pause()
+    }
   }
   toggleRef.current = toggle
 
@@ -660,14 +779,32 @@ export function Player({ episode, resumeAt, loadError = '', onTime, onEnded, onS
         playsInline
         autoPlay
         preload="auto"
+        disableRemotePlayback
         onPlay={() => {
           window.clearTimeout(waitTimer.current)
+          holdPlay.current = true
+          kicks.current = 0
           setPlaying(true)
           setBooting(false)
           setWaiting(false)
           setNeedTap(false)
         }}
-        onPause={() => setPlaying(false)}
+        onPause={() => {
+          if (!holdPlay.current) {
+            setPlaying(false)
+            return
+          }
+          window.setTimeout(() => {
+            const video = videoRef.current
+            if (!video || !holdPlay.current || !video.paused) return
+            if (kicks.current >= 8) {
+              setPlaying(false)
+              return
+            }
+            kicks.current += 1
+            void video.play()
+          }, 250)
+        }}
         onWaiting={() => {
           window.clearTimeout(waitTimer.current)
           waitTimer.current = window.setTimeout(() => setWaiting(true), 350)
@@ -767,6 +904,16 @@ export function Player({ episode, resumeAt, loadError = '', onTime, onEnded, onS
             aria-label="音量"
             onChange={(event) => applyVolume(Number(event.target.value))}
           />
+          <button
+            type="button"
+            className={loop ? 'fs-btn loop-btn is-on' : 'fs-btn loop-btn'}
+            aria-pressed={loop}
+            aria-label={loop ? '关闭循环播放' : '打开循环播放'}
+            onClick={() => onToggleLoop?.()}
+          >
+            <LoopIcon />
+            <span>循环</span>
+          </button>
           <button type="button" className="fs-btn" onClick={fullscreen} aria-label={full || shell ? '退出全屏' : '全屏'}>
             {full || shell ? <ExitFullscreenIcon /> : <FullscreenIcon />}
             <span>{full || shell ? '退出全屏' : '全屏'}</span>
@@ -790,6 +937,17 @@ function ListGlyph() {
     <svg viewBox="0 0 24 24" aria-hidden>
       <path d="M8 7h11M8 12h11M8 17h11" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
       <path d="M4.5 7h.01M4.5 12h.01M4.5 17h.01" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" />
+    </svg>
+  )
+}
+
+function LoopIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden>
+      <path d="M17 4h3v3" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M7 7h8a4 4 0 0 1 4 4v1" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+      <path d="M7 20H4v-3" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M17 17H9a4 4 0 0 1-4-4v-1" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
     </svg>
   )
 }

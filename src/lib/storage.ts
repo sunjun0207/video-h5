@@ -70,6 +70,7 @@ export function toggleFavorite(id: string): boolean {
   const exists = list.includes(id)
   const next = exists ? list.filter((item) => item !== id) : [id, ...list]
   writeJson(KEYS.favorites, next.slice(0, 100))
+  window.dispatchEvent(new Event('video-h5-favorites'))
   return !exists
 }
 

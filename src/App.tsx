@@ -4,7 +4,7 @@ import { MiniPlayer } from './components/MiniPlayer'
 import { ChannelNav } from './components/ChannelNav'
 import { Header } from './components/Header'
 import { BRAND, SLOGAN } from './lib/catalog'
-import { pausePlayback } from './lib/playbackSession'
+import { consumeNoticeOpen, pausePlayback, playPlayback, playbackNow, seekPlayback, togglePlayback } from './lib/playbackSession'
 import { addSearchHistory } from './lib/storage'
 import { bindScrollSaver, ensureAppDepth, goBack, href, navigate, parseHash, type Route } from './lib/router'
 import { ChannelPage } from './pages/ChannelPage'
@@ -28,6 +28,8 @@ export default function App() {
   const [libraryVersion, setLibraryVersion] = useState(0)
   const [searchActive, setSearchActive] = useState(false)
   const [kept, setKept] = useState<{ id: string; ep: number } | null>(null)
+  const keptRef = useRef(kept)
+  keptRef.current = kept
   const bump = useCallback(() => setLibraryVersion((value) => value + 1), [])
   const scrollMemo = useRef(new Map<string, number>())
   const routeKeyRef = useRef(href(readRoute()))
@@ -145,6 +147,53 @@ export default function App() {
     if (route.name === 'play') setKept({ id: route.id, ep: route.ep })
   }, [route])
 
+  useEffect(() => {
+    const onToggle = () => togglePlayback()
+    const onPlay = () => playPlayback()
+    const onPause = () => pausePlayback()
+    const onClose = () => {
+      pausePlayback()
+      setKept(null)
+    }
+    const onSeek = (event: Event) => {
+      const detail = (event as CustomEvent<number>).detail
+      if (typeof detail === 'number') seekPlayback(detail / 1000)
+    }
+    const onOpen = () => {
+      const raw = consumeNoticeOpen()
+      const [nid, epText] = raw.split('\n')
+      const live = playbackNow()
+      const fallback = keptRef.current
+      const id = nid || live?.id || fallback?.id || ''
+      const ep = nid ? Number(epText) : live ? live.ep : fallback?.ep
+      if (!id || ep == null || !Number.isFinite(ep)) return
+      navigate({ name: 'play', id, ep })
+    }
+    const onFavorites = () => bump()
+    window.addEventListener('app-toggle-playback', onToggle)
+    window.addEventListener('app-play-playback', onPlay)
+    window.addEventListener('app-pause-playback', onPause)
+    window.addEventListener('app-close-playback', onClose)
+    window.addEventListener('app-seek-playback', onSeek)
+    window.addEventListener('app-open-playback', onOpen)
+    window.addEventListener('video-h5-favorites', onFavorites)
+    const pending = consumeNoticeOpen()
+    if (pending) {
+      const [nid, epText] = pending.split('\n')
+      const ep = Number(epText)
+      if (nid && Number.isFinite(ep)) navigate({ name: 'play', id: nid, ep })
+    }
+    return () => {
+      window.removeEventListener('app-toggle-playback', onToggle)
+      window.removeEventListener('app-play-playback', onPlay)
+      window.removeEventListener('app-pause-playback', onPause)
+      window.removeEventListener('app-close-playback', onClose)
+      window.removeEventListener('app-seek-playback', onSeek)
+      window.removeEventListener('app-open-playback', onOpen)
+      window.removeEventListener('video-h5-favorites', onFavorites)
+    }
+  }, [bump])
+
   const playing = route.name === 'play'
   const live = playing ? { id: route.id, ep: route.ep } : kept
   const showMini = Boolean(live) && !playing
@@ -174,7 +223,7 @@ export default function App() {
           />
         ) : null}
         {live ? (
-          <div className={playing ? undefined : 'play-dock'} inert={playing ? undefined : true} aria-hidden={playing ? undefined : true}>
+          <div className={playing ? undefined : 'play-dock'} aria-hidden={playing ? undefined : true}>
             <Suspense
               fallback={
                 playing ? (
