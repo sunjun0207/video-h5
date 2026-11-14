@@ -71,9 +71,11 @@ type Props = {
   /** 已经返回上一页时播放器还在，只是画面藏到了底部小条里。 */
   visible?: boolean
   onKeepEp?: (ep: number) => void
+  /** 这一集已经有可播地址。没有播起来就离开时，不再把失败的播放页留在后面。 */
+  onPlayable?: () => void
 }
 
-export function PlayPage({ id, ep, onLibraryChange, onBack, visible = true, onKeepEp }: Props) {
+export function PlayPage({ id, ep, onLibraryChange, onBack, visible = true, onKeepEp, onPlayable }: Props) {
   useVideos()
   const item = getVideo(id)
   const [stream, setStream] = useState({ key: '', url: '', line: '', path: '' })
@@ -131,10 +133,15 @@ export function PlayPage({ id, ep, onLibraryChange, onBack, visible = true, onKe
 
   const itemId = item?.id
   useEffect(() => {
-    if (!itemId) return
+    if (!playUrl) return
+    onPlayable?.()
+  }, [playUrl, onPlayable])
+
+  useEffect(() => {
+    if (!itemId || !playUrl) return
     rememberPlay(itemId, index, resumeAt)
     onLibraryChange()
-  }, [itemId, index, onLibraryChange, resumeAt])
+  }, [itemId, index, onLibraryChange, playUrl, resumeAt])
 
   useEffect(() => {
     setSavePhase('idle')
@@ -215,22 +222,14 @@ export function PlayPage({ id, ep, onLibraryChange, onBack, visible = true, onKe
   )
 
   if (!item || !episode) {
-    if (error) {
-      return (
+    return (
+      <div className="play-page">
         <div className="wrap empty">
           <button type="button" className="detail-back" aria-label="返回" onClick={onBack}>
             <BackGlyph />
           </button>
-          {error}
+          {error ? <p>{error}</p> : <Pending text="正在为你加载精彩内容…" />}
         </div>
-      )
-    }
-    return (
-      <div className="wrap">
-        <button type="button" className="detail-back" aria-label="返回" onClick={onBack}>
-          <BackGlyph />
-        </button>
-        <Pending text="正在为你加载精彩内容…" />
       </div>
     )
   }

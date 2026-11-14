@@ -30,6 +30,11 @@ export default function App() {
   const [kept, setKept] = useState<{ id: string; ep: number } | null>(null)
   const keptRef = useRef(kept)
   keptRef.current = kept
+  const playableIdRef = useRef('')
+  const startedRef = useRef(false)
+  const markPlayable = useCallback(() => {
+    startedRef.current = true
+  }, [])
   const bump = useCallback(() => setLibraryVersion((value) => value + 1), [])
   const scrollMemo = useRef(new Map<string, number>())
   const routeKeyRef = useRef(href(readRoute()))
@@ -144,7 +149,18 @@ export default function App() {
   }
 
   useEffect(() => {
-    if (route.name === 'play') setKept({ id: route.id, ep: route.ep })
+    if (route.name === 'play') {
+      if (playableIdRef.current !== route.id) {
+        playableIdRef.current = route.id
+        startedRef.current = false
+      }
+      setKept({ id: route.id, ep: route.ep })
+      return
+    }
+    if (!startedRef.current) {
+      playableIdRef.current = ''
+      setKept(null)
+    }
   }, [route])
 
   useEffect(() => {
@@ -243,6 +259,7 @@ export default function App() {
                 visible={playing}
                 onLibraryChange={bump}
                 onKeepEp={(ep) => setKept({ id: live.id, ep })}
+                onPlayable={markPlayable}
                 onBack={() => {
                   if (route.name === 'play') goBack({ name: 'detail', id: route.id })
                   else goBack({ name: 'home' })

@@ -57,28 +57,13 @@ function shellViewport(): { width: number; height: number; left: number; top: nu
   }
 }
 
-/** 按比例铺满一块矩形，底部对齐，多出来的上沿由外层裁掉。 */
-function coverFrame(boxW: number, boxH: number, ratio: number) {
-  let frameW = boxW
-  let frameH = frameW / ratio
-  if (frameH < boxH) {
-    frameH = boxH
-    frameW = frameH * ratio
-  }
-  return {
-    width: Math.round(frameW),
-    height: Math.round(frameH),
-    left: Math.round((boxW - frameW) / 2),
-    top: Math.round(boxH - frameH),
-  }
-}
-
-function placeVideo(video: HTMLVideoElement, frame: { width: number; height: number; left: number; top: number }) {
+/** 视频元素跟容器一样大，整幅画面缩放进容器，不再伸到容器外面。 */
+function placeVideo(video: HTMLVideoElement, boxW: number, boxH: number) {
   video.style.position = 'absolute'
-  video.style.width = `${frame.width}px`
-  video.style.height = `${frame.height}px`
-  video.style.left = `${frame.left}px`
-  video.style.top = `${frame.top}px`
+  video.style.width = `${Math.round(boxW)}px`
+  video.style.height = `${Math.round(boxH)}px`
+  video.style.left = '0'
+  video.style.top = '0'
   video.style.right = 'auto'
   video.style.bottom = 'auto'
   video.style.margin = '0'
@@ -88,16 +73,15 @@ function placeVideo(video: HTMLVideoElement, frame: { width: number; height: num
   video.style.objectFit = 'fill'
 }
 
-/** 竖屏播放卡片里铺满 16:9 边框。视频脱离文档流，加载图标就不会被顶出卡片。 */
+/** 竖屏播放卡片里，画面跟卡片一样大。 */
 function fitInlineFrame(stage: HTMLElement, video: HTMLVideoElement) {
   const boxW = stage.clientWidth
   const boxH = stage.clientHeight
   if (boxW < 2 || boxH < 2) return
-  const ratio = video.videoWidth > 0 && video.videoHeight > 0 ? video.videoWidth / video.videoHeight : boxW / boxH
-  placeVideo(video, coverFrame(boxW, boxH, ratio))
+  placeVideo(video, boxW, boxH)
 }
 
-/** 画面铺满整块屏幕。多出来的一边从顶部裁掉，底部字幕留在屏幕里。 */
+/** 全屏时画面跟屏幕一样大。 */
 function fitShellFrame(stage: HTMLElement, video: HTMLVideoElement) {
   const box = shellViewport()
   stage.style.left = `${box.left}px`
@@ -108,8 +92,7 @@ function fitShellFrame(stage: HTMLElement, video: HTMLVideoElement) {
   stage.style.bottom = 'auto'
   stage.style.maxWidth = 'none'
   stage.style.maxHeight = 'none'
-  const ratio = video.videoWidth > 0 && video.videoHeight > 0 ? video.videoWidth / video.videoHeight : 16 / 9
-  placeVideo(video, coverFrame(box.width, box.height, ratio))
+  placeVideo(video, box.width, box.height)
   video.style.transform = 'none'
 }
 

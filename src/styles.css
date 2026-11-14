@@ -63,7 +63,8 @@ button { cursor: pointer; }
 .play-dock .play-bar,
 .play-dock .stage-center,
 .play-dock .stage-loading,
-.play-dock .stage-error {
+.play-dock .stage-error,
+.play-dock .empty {
   display: none;
 }
 .play-dock .play-page { visibility: hidden; }
@@ -570,8 +571,8 @@ button { cursor: pointer; }
   height: 100%;
   display: block;
   background: #000;
-  object-fit: cover;
-  object-position: center bottom;
+  object-fit: fill;
+  object-position: center;
 }
 .stage:fullscreen video,
 .stage:-webkit-full-screen video { width: 100%; height: 100%; }

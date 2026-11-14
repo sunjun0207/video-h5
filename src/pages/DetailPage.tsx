@@ -21,14 +21,20 @@ export function DetailPage({ id, libraryVersion, onLibraryChange, onBack }: Prop
   useVideos()
   const item = getVideo(id)
   const [error, setError] = useState('')
+  const [settled, setSettled] = useState(false)
   const hasEpisodes = Boolean(item?.episodes.length)
 
   useEffect(() => {
     let live = true
     setError('')
-    ensureDetail(id).catch((reason: unknown) => {
-      if (live) setError(reason instanceof Error ? reason.message : '没有找到相关内容')
-    })
+    setSettled(false)
+    ensureDetail(id)
+      .then(() => {
+        if (live) setSettled(true)
+      })
+      .catch((reason: unknown) => {
+        if (live) setError(reason instanceof Error ? reason.message : '没有找到相关内容')
+      })
     return () => {
       live = false
     }
@@ -43,13 +49,13 @@ export function DetailPage({ id, libraryVersion, onLibraryChange, onBack }: Prop
     return () => window.clearTimeout(timer)
   }, [id, hasEpisodes])
 
-  if (error) {
+  if (!item && error) {
     return (
       <div className="wrap empty">
         <button type="button" className="detail-back" aria-label="返回" onClick={onBack}>
           <BackGlyph />
         </button>
-        {error}
+        <p>{error}</p>
       </div>
     )
   }
@@ -105,9 +111,13 @@ export function DetailPage({ id, libraryVersion, onLibraryChange, onBack }: Prop
             <p className="detail-line">演职员：{item.actors.join('、')}</p>
             <p className="detail-summary">{item.summary}</p>
             <div className="detail-actions">
-              <a className="btn-play" href={href({ name: 'play', id: item.id, ep: Math.max(resumeEp, 0) })}>
-                {resumeEp >= 0 ? '接着看，精彩别错过' : '立即观看'}
-              </a>
+              {item.episodes.length > 0 ? (
+                <a className="btn-play" href={href({ name: 'play', id: item.id, ep: Math.max(resumeEp, 0) })}>
+                  {resumeEp >= 0 ? '接着看，精彩别错过' : '立即观看'}
+                </a>
+              ) : (
+                <p className="detail-line">{settled || error ? error || '没有找到可播放的资源' : '正在确认能不能播放…'}</p>
+              )}
               <button
                 type="button"
                 className={saved ? 'btn-ghost on' : 'btn-ghost'}

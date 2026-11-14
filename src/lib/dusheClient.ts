@@ -145,6 +145,12 @@ function solveChallenge(html: string): string {
 /** 片库对这个页面回了 404 或 5xx。片子还在时也会这样，过一会儿再打开往往又好了。 */
 class UnavailableError extends Error {}
 
+class MissingResourceError extends Error {
+  constructor() {
+    super('没有找到可播放的资源')
+  }
+}
+
 /** 片库回 404 或 5xx 时，隔这么久再试一次。 */
 const RETRY_MS = [800, 1600]
 
@@ -432,6 +438,7 @@ function parseSearch(html: string): VideoItem[] {
 }
 
 function parsePlay(html: string): string {
+  if (/没有找到对应资源|资源不存在|视频不存在|已下架/.test(html)) throw new MissingResourceError()
   const src = html.match(/src:\s*"([^"]+\.m3u8[^"]*)"/)?.[1]
   if (!src) throw new Error('这一集没有播放地址')
   return src
@@ -585,6 +592,7 @@ async function probeEntry(entry: PlayLine, signal: AbortSignal, measure: boolean
   if (!sample) return null
   // 带结束标记、加起来又不到正片的长度，就是占位片。没有结束标记的直播不算。
   const total = segments.reduce((sum, segment) => sum + segment.duration, 0)
+  if (/没有找到对应资源|资源不存在/.test(media.text)) throw new MissingResourceError()
   if (media.text.includes('#EXT-X-ENDLIST') && total < MIN_EPISODE_SECONDS) return null
   if (!only && isDead(media.url)) return null
   seedPlaylist(media.url, media.text)
@@ -671,12 +679,14 @@ function raceLines(picked: PlayLine[]): Promise<ProbeEntry> {
     let graceStarted = false
     let next = 0
     let unavailable = false
+    let missing = false
     const finish = (entry: ProbeEntry | undefined) => {
       if (settled) return
       settled = true
       for (const timer of timers) window.clearTimeout(timer)
       for (const controller of controllers) controller.abort()
       if (entry) resolve(entry)
+      else if (missing) reject(new MissingResourceError())
       else reject(unavailable ? new UnavailableError('这一集暂时打不开，请稍后再试') : new Error('这一集没有可播放的线路'))
     }
     const decide = (late: boolean) => {
@@ -698,6 +708,7 @@ function raceLines(picked: PlayLine[]): Promise<ProbeEntry> {
       probeEntry(picked[index], controllers[index].signal, true)
         .catch((reason: unknown) => {
           if (reason instanceof UnavailableError) unavailable = true
+          if (reason instanceof MissingResourceError) missing = true
           return null
         })
         .then((found) => {
@@ -772,15 +783,18 @@ export async function loadPlay(entries: PlayLine[], only = false): Promise<PlayC
     const skipped = list.filter((entry) => !picked.includes(entry)).slice(0, 6)
     let best: ProbeEntry | null = null
     let unavailable = false
+    let missing = false
     for (const lines of [picked, skipped]) {
       if (!lines.length) continue
       best = await pickPlayable(lines, only).catch((reason: unknown) => {
         if (reason instanceof UnavailableError) unavailable = true
+        if (reason instanceof MissingResourceError) missing = true
         return null
       })
       if (best) break
     }
     if (!best) {
+      if (missing) throw new MissingResourceError()
       if (!unavailable) throw new Error('这一集没有可播放的线路')
       throw new Error(only ? '这条线路暂时打不开，换一条试试' : '这一集暂时打不开，请稍后再试')
     }

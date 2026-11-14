@@ -140,7 +140,7 @@ export function warmDetail(id: string): void {
 export async function ensurePlayUrl(id: string, ep: number, onlyPath = '', skip: string[] = []): Promise<PlayChoice> {
   const item = await ensureDetail(id)
   const episode = item.episodes[ep]
-  if (!episode) throw new Error('没有找到这一集')
+  if (!episode) throw new Error(item.episodes.length ? '没有找到这一集' : '没有找到可播放的资源')
   const lines = (episode.lines?.length
     ? episode.lines
     : [{ label: episode.title, note: '', playPath: episode.playPath || '' }]
