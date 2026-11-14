@@ -9,6 +9,7 @@ import android.graphics.drawable.ColorDrawable;
 import android.os.Build;
 import android.os.Bundle;
 import android.view.View;
+import android.view.ViewGroup;
 import android.view.WindowManager;
 import android.webkit.CookieManager;
 import android.webkit.JavascriptInterface;
@@ -181,6 +182,37 @@ public class MainActivity extends BridgeActivity {
             attrs.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
             getWindow().setAttributes(attrs);
         }
+        relayoutAfterRotate();
+    }
+
+    /** 全屏时去掉 WebView 自己的边距，让页面跟屏幕一样大。 */
+    private void expandToScreen(View view) {
+        view.setPadding(0, 0, 0, 0);
+        ViewGroup.LayoutParams lp = view.getLayoutParams();
+        if (lp == null) return;
+        lp.width = ViewGroup.LayoutParams.MATCH_PARENT;
+        lp.height = ViewGroup.LayoutParams.MATCH_PARENT;
+        if (lp instanceof ViewGroup.MarginLayoutParams) {
+            ((ViewGroup.MarginLayoutParams) lp).setMargins(0, 0, 0, 0);
+        }
+        view.setLayoutParams(lp);
+    }
+
+    /** 转横屏后 WebView 的可视区域会晚一拍才变，补几次布局和 resize，画面才能按新尺寸铺满。 */
+    private void relayoutAfterRotate() {
+        if (bridge == null || bridge.getWebView() == null) return;
+        android.webkit.WebView web = bridge.getWebView();
+        expandToScreen(web);
+        web.requestLayout();
+        View parent = (View) web.getParent();
+        if (parent != null) {
+            expandToScreen(parent);
+            parent.requestLayout();
+        }
+        Runnable ping = () -> dispatchJs("window.dispatchEvent(new Event('resize'))");
+        web.post(ping);
+        web.postDelayed(ping, 250);
+        web.postDelayed(ping, 700);
     }
 
     private void exitLandscapePlayback() {
@@ -194,6 +226,12 @@ public class MainActivity extends BridgeActivity {
             WindowManager.LayoutParams attrs = getWindow().getAttributes();
             attrs.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_DEFAULT;
             getWindow().setAttributes(attrs);
+        }
+        if (bridge != null && bridge.getWebView() != null) {
+            android.webkit.WebView web = bridge.getWebView();
+            web.requestApplyInsets();
+            web.requestLayout();
+            web.post(() -> dispatchJs("window.dispatchEvent(new Event('resize'))"));
         }
     }
 

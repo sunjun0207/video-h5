@@ -34,6 +34,95 @@ function orientationBridge(): VideoOrientation | null {
   return bridge
 }
 
+/** 全屏时按当前可视区域取一块横屏画布。宽高用同一套视口，避免舞台比屏幕更高，按钮被顶出屏幕。 */
+function shellViewport(): { width: number; height: number; left: number; top: number } {
+  const viewport = window.visualViewport
+  let width = Math.round(viewport?.width || window.innerWidth)
+  let height = Math.round(viewport?.height || window.innerHeight)
+  if (width < 2 || height < 2) {
+    width = window.innerWidth
+    height = window.innerHeight
+  }
+  const type = window.screen.orientation?.type || ''
+  if (type.startsWith('landscape') && width < height) {
+    const across = height
+    height = width
+    width = across
+  }
+  return {
+    width,
+    height,
+    left: Math.round(viewport?.offsetLeft || 0),
+    top: Math.round(viewport?.offsetTop || 0),
+  }
+}
+
+/** 按比例铺满一块矩形，底部对齐，多出来的上沿由外层裁掉。 */
+function coverFrame(boxW: number, boxH: number, ratio: number) {
+  let frameW = boxW
+  let frameH = frameW / ratio
+  if (frameH < boxH) {
+    frameH = boxH
+    frameW = frameH * ratio
+  }
+  return {
+    width: Math.round(frameW),
+    height: Math.round(frameH),
+    left: Math.round((boxW - frameW) / 2),
+    top: Math.round(boxH - frameH),
+  }
+}
+
+function placeVideo(video: HTMLVideoElement, frame: { width: number; height: number; left: number; top: number }) {
+  video.style.position = 'absolute'
+  video.style.width = `${frame.width}px`
+  video.style.height = `${frame.height}px`
+  video.style.left = `${frame.left}px`
+  video.style.top = `${frame.top}px`
+  video.style.right = 'auto'
+  video.style.bottom = 'auto'
+  video.style.margin = '0'
+  video.style.padding = '0'
+  video.style.maxWidth = 'none'
+  video.style.maxHeight = 'none'
+  video.style.objectFit = 'fill'
+}
+
+/** 竖屏播放卡片里铺满 16:9 边框。视频脱离文档流，加载图标就不会被顶出卡片。 */
+function fitInlineFrame(stage: HTMLElement, video: HTMLVideoElement) {
+  const boxW = stage.clientWidth
+  const boxH = stage.clientHeight
+  if (boxW < 2 || boxH < 2) return
+  const ratio = video.videoWidth > 0 && video.videoHeight > 0 ? video.videoWidth / video.videoHeight : boxW / boxH
+  placeVideo(video, coverFrame(boxW, boxH, ratio))
+}
+
+/** 画面铺满整块屏幕。多出来的一边从顶部裁掉，底部字幕留在屏幕里。 */
+function fitShellFrame(stage: HTMLElement, video: HTMLVideoElement) {
+  const box = shellViewport()
+  stage.style.left = `${box.left}px`
+  stage.style.top = `${box.top}px`
+  stage.style.width = `${box.width}px`
+  stage.style.height = `${box.height}px`
+  stage.style.right = 'auto'
+  stage.style.bottom = 'auto'
+  stage.style.maxWidth = 'none'
+  stage.style.maxHeight = 'none'
+  const ratio = video.videoWidth > 0 && video.videoHeight > 0 ? video.videoWidth / video.videoHeight : 16 / 9
+  placeVideo(video, coverFrame(box.width, box.height, ratio))
+  video.style.transform = 'none'
+}
+
+function clearShellFrame(stage: HTMLElement, video: HTMLVideoElement) {
+  const names = ['left', 'top', 'right', 'bottom', 'width', 'height', 'maxWidth', 'maxHeight', 'margin', 'padding']
+  for (const node of [stage, video]) {
+    for (const name of names) node.style[name as 'left'] = ''
+  }
+  video.style.position = ''
+  video.style.objectFit = ''
+  video.style.transform = ''
+}
+
 type Props = {
   episode: Episode
   resumeAt: number
@@ -472,6 +561,49 @@ export function Player({ episode, resumeAt, loadError = '', onTime, onEnded, onS
       document.querySelector('meta[name="theme-color"]')?.setAttribute('content', '#f5f6f8')
     }
   }, [shell])
+
+  useEffect(() => {
+    const stage = stageRef.current
+    const video = videoRef.current
+    if (!stage || !video) return
+    const fit = () => {
+      if (shell || full) {
+        fitShellFrame(stage, video)
+        return
+      }
+      stage.style.left = ''
+      stage.style.top = ''
+      stage.style.right = ''
+      stage.style.bottom = ''
+      stage.style.width = ''
+      stage.style.height = ''
+      stage.style.maxWidth = ''
+      stage.style.maxHeight = ''
+      fitInlineFrame(stage, video)
+    }
+    fit()
+    const timers = [80, 240, 600].map((ms) => window.setTimeout(fit, ms))
+    const viewport = window.visualViewport
+    const observer = new ResizeObserver(fit)
+    observer.observe(stage)
+    viewport?.addEventListener('resize', fit)
+    viewport?.addEventListener('scroll', fit)
+    window.addEventListener('resize', fit)
+    window.addEventListener('orientationchange', fit)
+    video.addEventListener('loadedmetadata', fit)
+    video.addEventListener('resize', fit)
+    return () => {
+      timers.forEach((id) => window.clearTimeout(id))
+      observer.disconnect()
+      viewport?.removeEventListener('resize', fit)
+      viewport?.removeEventListener('scroll', fit)
+      window.removeEventListener('resize', fit)
+      window.removeEventListener('orientationchange', fit)
+      video.removeEventListener('loadedmetadata', fit)
+      video.removeEventListener('resize', fit)
+      clearShellFrame(stage, video)
+    }
+  }, [shell, full])
 
   useEffect(() => {
     bindPlaybackControls({
