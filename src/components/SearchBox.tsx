@@ -32,6 +32,23 @@ export function SearchBox({ value, onChange, onSubmit, onActiveChange, suggestHo
   const [composing, setComposing] = useState(false)
 
   useEffect(() => {
+    if (!open) return
+    const viewport = window.visualViewport
+    if (!viewport) return
+    let keyboard = viewport.height < window.innerHeight - 80
+    const onResize = () => {
+      const openKeyboard = viewport.height < window.innerHeight - 80
+      if (openKeyboard) keyboard = true
+      else if (keyboard) {
+        keyboard = false
+        inputRef.current?.blur()
+      }
+    }
+    viewport.addEventListener('resize', onResize)
+    return () => viewport.removeEventListener('resize', onResize)
+  }, [open])
+
+  useEffect(() => {
     const q = value.trim()
     if (!open || q.length < 1) {
       setItems([])

@@ -302,7 +302,7 @@ public final class PlaybackNotifier {
             .setCategory(NotificationCompat.CATEGORY_TRANSPORT)
             .setOnlyAlertOnce(true)
             .setOngoing(playing)
-            .setColor(0xFFDB2777)
+            .setColor(0xFFA67C52)
             .addAction(toggleIcon, toggleLabel, pendingBroadcast(ACTION_TOGGLE))
             .addAction(android.R.drawable.ic_menu_view, "进入应用", open)
             .addAction(android.R.drawable.ic_menu_close_clear_cancel, "关闭", pendingBroadcast(ACTION_CLOSE))

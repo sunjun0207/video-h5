@@ -199,7 +199,7 @@ export default function App() {
   const showMini = Boolean(live) && !playing
 
   return (
-    <div className={playing ? 'app playing' : searchActive ? 'app searching' : showMini ? 'app has-mini' : 'app'}>
+    <div className={['app', playing ? 'playing' : '', searchActive ? 'searching' : '', showMini ? 'has-mini' : ''].filter(Boolean).join(' ')}>
       <Header />
       {playing ? null : <ChannelNav route={route} />}
       <main>

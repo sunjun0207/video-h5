@@ -35,13 +35,22 @@ export function MiniPlayer({ id, ep, onOpen, onQueue, onClose }: Props) {
     observer.observe(node)
     const bar = node.closest('.mini-player')
     if (bar) observer.observe(bar)
+    const app = document.querySelector('.app')
+    const classObserver = new MutationObserver(place)
+    if (app) classObserver.observe(app, { attributes: true, attributeFilter: ['class'] })
+    const viewport = window.visualViewport
     window.addEventListener('resize', place)
     window.addEventListener('scroll', place, true)
+    viewport?.addEventListener('resize', place)
+    viewport?.addEventListener('scroll', place)
     return () => {
       window.cancelAnimationFrame(frame)
       observer.disconnect()
+      classObserver.disconnect()
       window.removeEventListener('resize', place)
       window.removeEventListener('scroll', place, true)
+      viewport?.removeEventListener('resize', place)
+      viewport?.removeEventListener('scroll', place)
       const root = document.documentElement
       root.style.removeProperty('--mini-x')
       root.style.removeProperty('--mini-y')
@@ -58,7 +67,7 @@ export function MiniPlayer({ id, ep, onOpen, onQueue, onClose }: Props) {
   const subtitle = (synced ? now?.subtitle : '') || episode?.title || `第 ${ep + 1} 集`
   const cover = (synced ? now?.cover : '') || video?.cover
   const mark = video?.mark || ''
-  const tone = video?.tone || (['#7c3aed', '#db2777'] as [string, string])
+  const tone = video?.tone || (['#a67c52', '#c4a27a'] as [string, string])
   const playing = Boolean(synced && now?.playing)
   const progress = synced && now && now.duration > 0 ? Math.min(1, Math.max(0, now.current / now.duration)) : 0
 
